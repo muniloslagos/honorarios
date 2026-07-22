@@ -122,6 +122,36 @@ Mas adelante se puede reemplazar por un modulo Administrador con base de datos p
 - `src/roles.php`: perfiles y reglas de acceso
 - `src/auth.php`: sesion/autorizacion
 
+## Base de datos MySQL
+
+Se agregaron scripts en:
+
+- `database/sql/schema.sql`
+- `database/sql/seed_qa.sql`
+
+### Crear estructura
+
+```bash
+mysql -u root -p < database/sql/schema.sql
+```
+
+### Cargar datos QA iniciales
+
+```bash
+mysql -u root -p < database/sql/seed_qa.sql
+```
+
+Con esto quedan creadas las tablas para:
+
+- usuarios y perfiles
+- convenios
+- funciones por convenio
+- decretos
+- informes mensuales
+- actividades del informe (en desarrollo)
+- archivos de informe
+- auditoria
+
 ## Notas
 
 - Si la estructura del `userinfo` de tu integracion trae el RUN con otro nombre de campo, ajusta la funcion `extractRunFromUserInfo` en `src/roles.php`.
