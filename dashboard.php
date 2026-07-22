@@ -169,7 +169,7 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
             background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom) 45%);
         }
 
-        .layout { display: flex; min-height: 100vh; }
+        .layout { display: flex; min-height: 100vh; align-items: flex-start; }
 
         .sidebar {
             width: 280px;
@@ -177,6 +177,10 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
             background: rgba(255, 255, 255, 0.76);
             border-right: 1px solid var(--line);
             backdrop-filter: blur(4px);
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            overflow-y: auto;
         }
 
         .brand { margin: 0 0 18px; font-size: 1.1rem; }
@@ -212,7 +216,7 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
             padding: 2px 7px;
         }
 
-        .content { flex: 1; padding: 22px; }
+        .content { flex: 1; min-width: 0; padding: 22px; }
 
         .topbar {
             background: var(--surface);
@@ -384,15 +388,17 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
         @media (max-width: 1120px) {
             .grid-kpi { grid-template-columns: repeat(2, minmax(170px, 1fr)); }
             .grid-main { grid-template-columns: 1fr; }
-            .sidebar { width: 240px; }
+            .sidebar { width: 250px; }
         }
 
         @media (max-width: 860px) {
-            .layout { display: block; }
+            .layout { flex-direction: column; }
             .sidebar {
                 width: 100%;
                 border-right: 0;
                 border-bottom: 1px solid var(--line);
+                height: auto;
+                position: relative;
             }
             .content { padding: 14px; }
         }
