@@ -1,4 +1,4 @@
-USE honorarios_db;
+USE appmuniloslagos_sgh;
 
 -- Usuario Honorario de pruebas (RUN QA)
 INSERT INTO system_users (run, full_name, email, role, profession_experience)

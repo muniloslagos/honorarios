@@ -3,11 +3,11 @@
 -- Motor: MySQL 8+
 -- =====================================================
 
-CREATE DATABASE IF NOT EXISTS honorarios_db
+CREATE DATABASE IF NOT EXISTS appmuniloslagos_sgh
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
-USE honorarios_db;
+USE appmuniloslagos_sgh;
 
 -- -----------------------------------------------------
 -- 1) Usuarios del sistema (todos los perfiles)

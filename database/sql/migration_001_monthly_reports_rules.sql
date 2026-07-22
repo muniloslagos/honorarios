@@ -5,7 +5,7 @@
 -- - vigencia por fechas inicio/fin
 -- =====================================================
 
-USE honorarios_db;
+USE appmuniloslagos_sgh;
 
 -- 1) Quitar restriccion antigua: un informe por usuario/mes/anio
 ALTER TABLE monthly_reports
