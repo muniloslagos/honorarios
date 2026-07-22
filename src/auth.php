@@ -40,6 +40,78 @@ function requireRole(string $role): array
     return $user;
 }
 
+function isLocalAuthEnabled(): bool
+{
+    $flag = envValue('LOCAL_AUTH_ENABLED', 'false');
+    if (filter_var($flag, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) !== null) {
+        return filter_var($flag, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    $mode = strtolower((string) envValue('AUTH_MODE', envValue('APP_ENV', 'production')));
+
+    return $mode === 'local' || $mode === 'development' || $mode === 'dev';
+}
+
+function getLocalAuthProfiles(): array
+{
+    return [
+        ROLE_ADMIN => [
+            'username' => envValue('LOCAL_AUTH_ADMIN_USERNAME', 'admin'),
+            'password' => envValue('LOCAL_AUTH_ADMIN_PASSWORD', 'admin123'),
+            'run' => envValue('LOCAL_AUTH_ADMIN_RUN', '11111111-1'),
+            'name' => envValue('LOCAL_AUTH_ADMIN_NAME', 'Administrador Local'),
+            'profession' => envValue('LOCAL_AUTH_ADMIN_PROFESSION', 'Administración'),
+        ],
+        ROLE_RRHH => [
+            'username' => envValue('LOCAL_AUTH_RRHH_USERNAME', 'rrhh'),
+            'password' => envValue('LOCAL_AUTH_RRHH_PASSWORD', 'rrhh123'),
+            'run' => envValue('LOCAL_AUTH_RRHH_RUN', '22222222-2'),
+            'name' => envValue('LOCAL_AUTH_RRHH_NAME', 'RRHH Local'),
+            'profession' => envValue('LOCAL_AUTH_RRHH_PROFESSION', 'RRHH'),
+        ],
+        ROLE_FINANZAS => [
+            'username' => envValue('LOCAL_AUTH_FINANZAS_USERNAME', 'finanzas'),
+            'password' => envValue('LOCAL_AUTH_FINANZAS_PASSWORD', 'finanzas123'),
+            'run' => envValue('LOCAL_AUTH_FINANZAS_RUN', '33333333-3'),
+            'name' => envValue('LOCAL_AUTH_FINANZAS_NAME', 'Finanzas Local'),
+            'profession' => envValue('LOCAL_AUTH_FINANZAS_PROFESSION', 'Finanzas'),
+        ],
+        ROLE_HONORARIO => [
+            'username' => envValue('LOCAL_AUTH_HONORARIO_USERNAME', 'honorario'),
+            'password' => envValue('LOCAL_AUTH_HONORARIO_PASSWORD', 'honorario123'),
+            'run' => envValue('LOCAL_AUTH_HONORARIO_RUN', '44444444-4'),
+            'name' => envValue('LOCAL_AUTH_HONORARIO_NAME', 'Honorario Local'),
+            'profession' => envValue('LOCAL_AUTH_HONORARIO_PROFESSION', 'Administración Pública'),
+        ],
+    ];
+}
+
+function authenticateLocalUser(string $username, string $password): ?array
+{
+    $normalizedUsername = strtolower(trim($username));
+    $normalizedPassword = (string) $password;
+
+    foreach (getLocalAuthProfiles() as $role => $profile) {
+        $profileUsername = strtolower(trim((string) ($profile['username'] ?? '')));
+        $profilePassword = (string) ($profile['password'] ?? '');
+
+        if ($profileUsername === $normalizedUsername && $profilePassword === $normalizedPassword) {
+            return [
+                'role' => $role,
+                'user_info' => [
+                    'run' => (string) ($profile['run'] ?? ''),
+                    'name' => (string) ($profile['name'] ?? 'Usuario Local'),
+                    'profesion' => (string) ($profile['profession'] ?? ''),
+                    'local' => true,
+                    'username' => $profileUsername,
+                ],
+            ];
+        }
+    }
+
+    return null;
+}
+
 function loginUser(array $userInfo, string $role): void
 {
     $_SESSION['auth'] = [

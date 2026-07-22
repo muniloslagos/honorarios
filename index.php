@@ -86,16 +86,17 @@ $envExists = is_file(__DIR__ . '/.env');
 <body>
     <main class="card">
         <h1>Sistema de Administracion de Honorarios</h1>
-        <p>Inicio de sesion integrado con ClaveUnica. En esta etapa solo se habilita el perfil Honorario.</p>
+        <p>Inicio de sesion con ClaveUnica o con credenciales locales de desarrollo para trabajar en paralelo.</p>
 
         <div class="roles">
-            <div class="role"><strong>Administrador:</strong> definido (pendiente implementacion funcional)</div>
-            <div class="role"><strong>RRHH:</strong> definido (pendiente implementacion funcional)</div>
-            <div class="role"><strong>Finanzas:</strong> definido (pendiente implementacion funcional)</div>
+            <div class="role"><strong>Administrador:</strong> habilitado para pruebas locales</div>
+            <div class="role"><strong>RRHH:</strong> habilitado para pruebas locales</div>
+            <div class="role"><strong>Finanzas:</strong> habilitado para pruebas locales</div>
             <div class="role"><strong>Honorario:</strong> activo para login y dashboard</div>
         </div>
 
-        <a class="btn" href="login.php">Ingresar con ClaveUnica</a>
+        <a class="btn" href="login.php">Ingresar modo local</a>
+        <a class="btn" href="login.php?mode=claveunica" style="margin-left: 8px; background: linear-gradient(135deg, #0b7285, #2c7a7b);">Ingresar con ClaveUnica</a>
 
         <?php if (!$envExists): ?>
             <div class="warn">No existe .env en este despliegue. El sistema cargo .env.example como respaldo. Crea .env en el servidor para definir credenciales reales y RUN autorizados.</div>
