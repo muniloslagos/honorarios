@@ -26,7 +26,7 @@ APP_URL=https://app.muniloslagos.cl/sgh
 
 CU_CLIENT_ID=tu_client_id
 CU_CLIENT_SECRET=tu_client_secret
-CU_REDIRECT_URI=https://app.muniloslagos.cl/sgh/callback.php
+CU_REDIRECT_URI=https://app.muniloslagos.cl/sgh/auth/callback
 
 CU_AUTH_URL=https://accounts.claveunica.gob.cl/openid/authorize/
 CU_TOKEN_URL=https://accounts.claveunica.gob.cl/openid/token/
@@ -39,7 +39,7 @@ HONORARIO_RUN_WHITELIST=12345678-9,11111111-1
 
 En el portal de integracion, la URI de retorno debe ser exactamente:
 
-- `https://app.muniloslagos.cl/sgh/callback.php`
+- `https://app.muniloslagos.cl/sgh/auth/callback`
 
 Si usas otro dominio/puerto/ruta, actualiza tambien `APP_URL` y `CU_REDIRECT_URI`.
 
@@ -114,7 +114,7 @@ Mas adelante se puede reemplazar por un modulo Administrador con base de datos p
 
 - `index.php`: pantalla de ingreso
 - `login.php`: redireccion a ClaveUnica
-- `callback.php`: procesamiento OAuth2 y login
+- `auth/callback`: procesamiento OAuth2 y login
 - `dashboard.php`: panel del perfil Honorario
 - `logout.php`: cierre de sesion
 - `src/bootstrap.php`: carga de entorno y utilidades
