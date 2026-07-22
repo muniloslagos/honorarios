@@ -73,6 +73,13 @@ Si aparece "La solicitud fallo debido a que la URI de redireccion no es valida",
 2. Que `CU_REDIRECT_URI` sea exactamente la misma registrada en ClaveUnica.
 3. Que no haya diferencias en `http` vs `https`, `localhost` vs `127.0.0.1`, puerto o slash final.
 
+Conclusiones relevantes de la guia oficial:
+
+1. `localhost` no esta permitido como Redirect URI.
+2. La Redirect URI no puede incluir query string; solo esquema, autoridad y path.
+3. Para produccion, la Redirect URI debe usar dominio `.gob.cl`.
+4. Si necesitas cambiar la Redirect URI registrada, debes hacerlo en Cerofilas en el tramite de actualizacion de URIs.
+
 Puedes abrir `https://app.muniloslagos.cl/honorarios/diagnostico-claveunica.php` para ver la Redirect URI y la Authorization URL reales que envia el sistema.
 
 ## 5.1) Despliegue en servidor

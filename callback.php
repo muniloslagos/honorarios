@@ -28,7 +28,7 @@ if (!is_string($code) || trim($code) === '') {
     exit;
 }
 
-$tokenResponse = exchangeCodeForToken($code);
+$tokenResponse = exchangeCodeForToken($code, (string) $state);
 if (isset($tokenResponse['error']) || !isset($tokenResponse['access_token'])) {
     http_response_code(401);
     echo 'No se pudo obtener token de acceso.';

@@ -53,7 +53,7 @@ function buildClaveUnicaAuthUrl(): string
     return $config['auth_url'] . '?' . http_build_query($params);
 }
 
-function exchangeCodeForToken(string $code): array
+function exchangeCodeForToken(string $code, string $state): array
 {
     $config = requireClaveUnicaConfig();
 
@@ -63,6 +63,7 @@ function exchangeCodeForToken(string $code): array
         'client_secret' => $config['client_secret'],
         'code' => $code,
         'redirect_uri' => $config['redirect_uri'],
+        'state' => $state,
     ]);
 
     return httpRequest($config['token_url'], 'POST', [
@@ -74,7 +75,7 @@ function fetchUserInfo(string $accessToken): array
 {
     $config = requireClaveUnicaConfig();
 
-    return httpRequest($config['userinfo_url'], 'GET', [
+    return httpRequest($config['userinfo_url'], 'POST', [
         'Authorization: Bearer ' . $accessToken,
         'Accept: application/json',
     ]);
