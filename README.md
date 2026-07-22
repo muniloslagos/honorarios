@@ -128,6 +128,7 @@ Se agregaron scripts en:
 
 - `database/sql/schema.sql`
 - `database/sql/seed_qa.sql`
+- `database/sql/migration_001_monthly_reports_rules.sql`
 
 ### Crear estructura
 
@@ -141,6 +142,12 @@ mysql -u root -p < database/sql/schema.sql
 mysql -u root -p < database/sql/seed_qa.sql
 ```
 
+### Aplicar reglas nuevas de informes mensuales sobre BD existente
+
+```bash
+mysql -u root -p < database/sql/migration_001_monthly_reports_rules.sql
+```
+
 Con esto quedan creadas las tablas para:
 
 - usuarios y perfiles
@@ -152,7 +159,14 @@ Con esto quedan creadas las tablas para:
 - archivos de informe
 - auditoria
 
+Reglas aplicadas para `monthly_reports`:
+
+- Se permiten multiples informes en un mismo mes/anio por usuario.
+- Si el informe usa `source_type=CONVENIO`, no se permite duplicar el mismo convenio en el mismo mes/anio.
+- Si el informe es `MANUAL`, no se aplica esa validacion.
+- La vigencia del informe se guarda como `agreement_start_date` y `agreement_end_date`.
+
 ## Notas
 
 - Si la estructura del `userinfo` de tu integracion trae el RUN con otro nombre de campo, ajusta la funcion `extractRunFromUserInfo` en `src/roles.php`.
-- Esta etapa no incluye base de datos aun. El control de acceso de Honorario se hace por lista blanca de RUN en `.env`.
+- El control de acceso de Honorario hoy se mantiene por lista blanca de RUN en `.env`; en una etapa posterior se reemplazara por control en base de datos.

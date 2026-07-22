@@ -109,8 +109,15 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
   -- Campos manuales o autocompletados desde convenio
   program_activity_text VARCHAR(255) NOT NULL,
   decree_number_text VARCHAR(80) NULL,
-  agreement_validity_text VARCHAR(120) NULL,
+  agreement_start_date DATE NULL,
+  agreement_end_date DATE NULL,
   installment_number INT UNSIGNED NULL,
+
+  -- Permite multiples informes manuales en mismo mes/anio,
+  -- pero evita duplicar un informe para el mismo convenio y periodo.
+  agreement_validation_id BIGINT GENERATED ALWAYS AS (
+    CASE WHEN source_type = 'CONVENIO' THEN agreement_id ELSE NULL END
+  ) STORED,
 
   status ENUM('BORRADOR', 'ENVIADO', 'OBSERVADO', 'APROBADO', 'RECHAZADO') NOT NULL DEFAULT 'BORRADOR',
   observations TEXT NULL,
@@ -119,7 +126,7 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   submitted_at TIMESTAMP NULL,
 
-  UNIQUE KEY uq_monthly_report_period (honorario_user_id, report_month, report_year),
+  UNIQUE KEY uq_monthly_report_convenio_period (honorario_user_id, report_year, report_month, agreement_validation_id),
   KEY idx_monthly_reports_user (honorario_user_id),
   KEY idx_monthly_reports_status (status),
   KEY idx_monthly_reports_agreement (agreement_id),
@@ -127,7 +134,12 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
   CONSTRAINT fk_monthly_reports_honorario_user
     FOREIGN KEY (honorario_user_id) REFERENCES system_users(id),
   CONSTRAINT fk_monthly_reports_agreement
-    FOREIGN KEY (agreement_id) REFERENCES agreements(id)
+    FOREIGN KEY (agreement_id) REFERENCES agreements(id),
+  CONSTRAINT chk_monthly_reports_source
+    CHECK (
+      (source_type = 'MANUAL') OR
+      (source_type = 'CONVENIO' AND agreement_id IS NOT NULL)
+    )
 ) ENGINE=InnoDB;
 
 -- Actividades del informe (dejar preparado, parte funcional en desarrollo)
