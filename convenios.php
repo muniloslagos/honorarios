@@ -11,6 +11,27 @@ $pdo = db();
 $success = '';
 $error = '';
 
+function resolveAgreementStatus(string $startDate, string $endDate): string
+{
+    try {
+        $today = new DateTimeImmutable('today');
+        $start = new DateTimeImmutable($startDate);
+        $end = new DateTimeImmutable($endDate);
+    } catch (Throwable $e) {
+        return 'VIGENTE';
+    }
+
+    if ($today < $start) {
+        return 'PENDIENTE_FIRMA';
+    }
+
+    if ($today > $end) {
+        return 'NO_VIGENTE';
+    }
+
+    return 'VIGENTE';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         if (isset($_POST['create_decree_inline'])) {
@@ -46,12 +67,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $installments = trim((string) ($_POST['installments_total'] ?? ''));
             $programItem = trim((string) ($_POST['program_item'] ?? ''));
             $decreeId = trim((string) ($_POST['decree_id'] ?? ''));
-            $status = trim((string) ($_POST['status'] ?? 'VIGENTE'));
-            $functionsRaw = trim((string) ($_POST['functions_text'] ?? ''));
+
+            $functionItems = $_POST['functions_items'] ?? [];
+            $functionsList = [];
+            if (is_array($functionItems)) {
+                foreach ($functionItems as $item) {
+                    $text = trim((string) $item);
+                    if ($text !== '') {
+                        $functionsList[] = $text;
+                    }
+                }
+            }
+
+            if (count($functionsList) === 0) {
+                $functionsRaw = trim((string) ($_POST['functions_text'] ?? ''));
+                $legacyLines = preg_split('/\r\n|\r|\n/', $functionsRaw) ?: [];
+                foreach ($legacyLines as $line) {
+                    $text = trim((string) $line);
+                    if ($text !== '') {
+                        $functionsList[] = $text;
+                    }
+                }
+            }
 
             if ($agreementNumber === '' || $agreementDate === '' || $startDate === '' || $endDate === '' || $programItem === '') {
                 throw new RuntimeException('Completa los campos obligatorios del convenio.');
             }
+
+            $status = resolveAgreementStatus($startDate, $endDate);
 
             $agreementPdf = uploadPdf($_FILES['agreement_pdf'] ?? [], 'agreements/' . $dbUser['run']);
 
@@ -83,7 +126,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'decree' => $decreeId !== '' ? (int) $decreeId : null,
                 'pdfn' => $agreementPdf['original_name'] ?? null,
                 'pdfp' => $agreementPdf['stored_path'] ?? null,
-                'st' => in_array($status, ['VIGENTE', 'NO_VIGENTE', 'PENDIENTE_FIRMA'], true) ? $status : 'VIGENTE',
+                'st' => $status,
                 'actor' => $dbUser['id'],
             ]);
 
@@ -95,13 +138,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $agreementId = (int) $agreement['id'];
                 $pdo->prepare('DELETE FROM agreement_functions WHERE agreement_id = :id')->execute(['id' => $agreementId]);
 
-                $lines = preg_split('/\r\n|\r|\n/', $functionsRaw) ?: [];
                 $order = 1;
-                foreach ($lines as $line) {
-                    $text = trim((string) $line);
-                    if ($text === '') {
-                        continue;
-                    }
+                foreach ($functionsList as $text) {
                     $insFn = $pdo->prepare('INSERT INTO agreement_functions (agreement_id, function_text, sort_order) VALUES (:aid, :txt, :ord)');
                     $insFn->execute(['aid' => $agreementId, 'txt' => $text, 'ord' => $order]);
                     $order++;
@@ -109,6 +147,115 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $success = 'Convenio guardado correctamente.';
+        }
+
+        if (isset($_POST['update_agreement_functions'])) {
+            $agreementId = (int) ($_POST['agreement_id'] ?? 0);
+            if ($agreementId <= 0) {
+                throw new RuntimeException('Convenio invalido para actualizar funciones.');
+            }
+
+            $agreementOwner = $pdo->prepare('SELECT id FROM agreements WHERE id = :id AND honorario_user_id = :uid LIMIT 1');
+            $agreementOwner->execute(['id' => $agreementId, 'uid' => $dbUser['id']]);
+            if ($agreementOwner->fetch() === false) {
+                throw new RuntimeException('No tienes permisos para editar funciones de este convenio.');
+            }
+
+            $idsRaw = $_POST['function_ids'] ?? [];
+            $textsRaw = $_POST['function_texts'] ?? [];
+            if (!is_array($idsRaw) || !is_array($textsRaw)) {
+                throw new RuntimeException('Formato de funciones invalido.');
+            }
+
+            $submittedRows = [];
+            $len = max(count($idsRaw), count($textsRaw));
+            for ($i = 0; $i < $len; $i++) {
+                $rowId = isset($idsRaw[$i]) ? (int) $idsRaw[$i] : 0;
+                $rowText = isset($textsRaw[$i]) ? trim((string) $textsRaw[$i]) : '';
+                if ($rowText === '') {
+                    continue;
+                }
+                $submittedRows[] = ['id' => $rowId, 'text' => $rowText];
+            }
+
+            $currentStmt = $pdo->prepare('SELECT id, function_text FROM agreement_functions WHERE agreement_id = :aid ORDER BY sort_order ASC, id ASC');
+            $currentStmt->execute(['aid' => $agreementId]);
+            $currentRows = $currentStmt->fetchAll();
+            $currentById = [];
+            foreach ($currentRows as $row) {
+                $currentById[(int) $row['id']] = (string) $row['function_text'];
+            }
+
+            $submittedExistingIds = [];
+            foreach ($submittedRows as $row) {
+                if ($row['id'] > 0) {
+                    $submittedExistingIds[] = $row['id'];
+                }
+            }
+
+            $deletedIds = array_values(array_diff(array_keys($currentById), $submittedExistingIds));
+            if (count($deletedIds) > 0) {
+                $deletedTexts = [];
+                foreach ($deletedIds as $deletedId) {
+                    $deletedTexts[] = $currentById[$deletedId];
+                }
+
+                if (count($deletedTexts) > 0) {
+                    $inTexts = implode(',', array_fill(0, count($deletedTexts), '?'));
+                    $checkSql = 'SELECT 1
+                                 FROM monthly_report_activities a
+                                 JOIN monthly_reports r ON r.id = a.report_id
+                                 WHERE r.honorario_user_id = ?
+                                   AND r.agreement_id = ?
+                                   AND a.activity_description IN (' . $inTexts . ')
+                                 LIMIT 1';
+                    $checkStmt = $pdo->prepare($checkSql);
+                    $checkStmt->execute(array_merge([$dbUser['id'], $agreementId], $deletedTexts));
+                    if ($checkStmt->fetch() !== false) {
+                        throw new RuntimeException('No puedes eliminar funciones que ya estan relacionadas a actividades de informes.');
+                    }
+                }
+            }
+
+            $pdo->beginTransaction();
+            try {
+                $updateStmt = $pdo->prepare('UPDATE agreement_functions SET function_text = :txt, sort_order = :ord WHERE id = :id AND agreement_id = :aid');
+                $insertStmt = $pdo->prepare('INSERT INTO agreement_functions (agreement_id, function_text, sort_order) VALUES (:aid, :txt, :ord)');
+                $order = 1;
+                foreach ($submittedRows as $row) {
+                    if ($row['id'] > 0 && isset($currentById[$row['id']])) {
+                        $updateStmt->execute([
+                            'txt' => $row['text'],
+                            'ord' => $order,
+                            'id' => $row['id'],
+                            'aid' => $agreementId,
+                        ]);
+                    } else {
+                        $insertStmt->execute([
+                            'aid' => $agreementId,
+                            'txt' => $row['text'],
+                            'ord' => $order,
+                        ]);
+                    }
+                    $order++;
+                }
+
+                if (count($deletedIds) > 0) {
+                    $inDelete = implode(',', array_fill(0, count($deletedIds), '?'));
+                    $deleteSql = 'DELETE FROM agreement_functions WHERE agreement_id = ? AND id IN (' . $inDelete . ')';
+                    $deleteStmt = $pdo->prepare($deleteSql);
+                    $deleteStmt->execute(array_merge([$agreementId], $deletedIds));
+                }
+
+                $pdo->commit();
+            } catch (Throwable $txe) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $txe;
+            }
+
+            $success = 'Funciones del convenio actualizadas correctamente.';
         }
     } catch (Throwable $e) {
         $error = $e->getMessage();
@@ -127,14 +274,17 @@ $functionsByAgreement = [];
 if (count($agreements) > 0) {
     $ids = array_map(static fn(array $a): int => (int) $a['id'], $agreements);
     $in = implode(',', array_fill(0, count($ids), '?'));
-    $fnStmt = $pdo->prepare("SELECT agreement_id, function_text FROM agreement_functions WHERE agreement_id IN ($in) ORDER BY sort_order ASC, id ASC");
+    $fnStmt = $pdo->prepare("SELECT agreement_id, id, function_text FROM agreement_functions WHERE agreement_id IN ($in) ORDER BY sort_order ASC, id ASC");
     $fnStmt->execute($ids);
     foreach ($fnStmt->fetchAll() as $row) {
         $aid = (int) $row['agreement_id'];
         if (!isset($functionsByAgreement[$aid])) {
             $functionsByAgreement[$aid] = [];
         }
-        $functionsByAgreement[$aid][] = (string) $row['function_text'];
+        $functionsByAgreement[$aid][] = [
+            'id' => (int) $row['id'],
+            'text' => (string) $row['function_text'],
+        ];
     }
 }
 ?>
@@ -468,6 +618,48 @@ if (count($agreements) > 0) {
 
         .pdf-link:hover { text-decoration: underline; }
 
+        .fn-preview {
+            display: grid;
+            gap: 8px;
+            padding: 10px;
+            border: 1px dashed #b9cfe0;
+            border-radius: var(--radius-md);
+            background: #fafdff;
+            min-height: 76px;
+        }
+
+        .fn-empty {
+            margin: 0;
+            color: var(--c-muted);
+            font-size: .85rem;
+        }
+
+        .fn-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .fn-row input[type="text"] {
+            flex: 1;
+        }
+
+        .btn-danger {
+            background: #ffeaea;
+            color: #972b2b;
+            border: 1px solid #efbcbc;
+            padding: 8px 10px;
+            border-radius: var(--radius-md);
+            font-size: .8rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .btn-danger:hover {
+            background: #ffd9d9;
+        }
+
         .modal-bg {
             position: fixed;
             inset: 0;
@@ -593,19 +785,21 @@ if (count($agreements) > 0) {
                             </div>
                         </div>
                         <div class="field">
-                            <label>Estado</label>
-                            <select name="status">
-                                <option value="VIGENTE">VIGENTE</option>
-                                <option value="PENDIENTE_FIRMA">PENDIENTE_FIRMA</option>
-                                <option value="NO_VIGENTE">NO_VIGENTE</option>
-                            </select>
+                            <label>Estado (automatico)</label>
+                            <input type="text" value="Se calcula segun vigencia" readonly>
                         </div>
                     </div>
 
                     <div class="grid-2" style="margin-top:12px;">
                         <div class="field">
-                            <label>Funciones (una por linea)</label>
-                            <textarea name="functions_text" placeholder="Funcion 1&#10;Funcion 2&#10;Funcion 3"></textarea>
+                            <label>Funciones del convenio</label>
+                            <div class="fn-preview" id="createFunctionsPreview">
+                                <p class="fn-empty">Aun no agregas funciones.</p>
+                            </div>
+                            <div id="createFunctionsHidden"></div>
+                            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                                <button class="btn btn-link" type="button" id="openCreateFunctionsModal">Agregar funciones</button>
+                            </div>
                         </div>
                         <div class="field">
                             <label>Documento PDF</label>
@@ -636,12 +830,13 @@ if (count($agreements) > 0) {
                             <th>Decreto</th>
                             <th>Funciones</th>
                             <th>PDF</th>
+                            <th>Acciones</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach ($agreements as $a): ?>
                             <?php
-                                $status = (string) $a['status'];
+                                $status = resolveAgreementStatus((string) $a['start_date'], (string) $a['end_date']);
                                 $statusClass = $status === 'VIGENTE' ? 'status-vigente' : ($status === 'PENDIENTE_FIRMA' ? 'status-pendiente' : 'status-no-vigente');
                             ?>
                             <tr>
@@ -657,7 +852,7 @@ if (count($agreements) > 0) {
                                 <td>
                                     <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
                                     <?php foreach ($items as $fn): ?>
-                                        <span class="list-chip"><?php echo htmlspecialchars($fn, ENT_QUOTES, 'UTF-8'); ?></span>
+                                        <span class="list-chip"><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></span>
                                     <?php endforeach; ?>
                                     <?php if (count($items) === 0): ?>
                                         <span class="agreement-meta">Sin funciones registradas</span>
@@ -670,11 +865,23 @@ if (count($agreements) > 0) {
                                         <span class="agreement-meta">Sin archivo</span>
                                     <?php endif; ?>
                                 </td>
+                                <td>
+                                    <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
+                                    <button
+                                        class="btn btn-link openEditFunctionsModal"
+                                        type="button"
+                                        data-agreement-id="<?php echo (int) $a['id']; ?>"
+                                        data-agreement-number="<?php echo htmlspecialchars((string) $a['agreement_number'], ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-functions="<?php echo htmlspecialchars((string) json_encode($items, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8'); ?>"
+                                    >
+                                        Editar funciones
+                                    </button>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                         <?php if (count($agreements) === 0): ?>
                             <tr>
-                                <td colspan="5" class="empty">No hay convenios registrados.</td>
+                                <td colspan="6" class="empty">No hay convenios registrados.</td>
                             </tr>
                         <?php endif; ?>
                     </tbody>
@@ -716,6 +923,44 @@ if (count($agreements) > 0) {
         </div>
     </div>
 
+    <div id="createFunctionsModalBg" class="modal-bg" aria-hidden="true">
+        <div class="modal">
+            <div class="modal-head">
+                <h3>Funciones del convenio</h3>
+            </div>
+            <div class="modal-body">
+                <p class="form-hint">Agrega una funcion por campo. Puedes sumar o quitar filas segun necesites.</p>
+                <div id="createFunctionsRows"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-soft" type="button" id="addCreateFunctionRow">Agregar otra funcion</button>
+                    <button class="btn btn-primary" type="button" id="saveCreateFunctions">Guardar funciones</button>
+                    <button class="btn btn-soft" type="button" id="closeCreateFunctionsModal">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="editFunctionsModalBg" class="modal-bg" aria-hidden="true">
+        <div class="modal">
+            <div class="modal-head">
+                <h3 id="editFunctionsTitle">Editar funciones</h3>
+            </div>
+            <div class="modal-body">
+                <p class="form-hint">Puedes editar o agregar funciones. Si una funcion ya tiene actividades en informes, no podra eliminarse.</p>
+                <form method="post" id="editFunctionsForm">
+                    <input type="hidden" name="update_agreement_functions" value="1">
+                    <input type="hidden" name="agreement_id" id="editAgreementId" value="0">
+                    <div id="editFunctionsRows"></div>
+                    <div class="modal-actions">
+                        <button class="btn btn-soft" type="button" id="addEditFunctionRow">Agregar otra funcion</button>
+                        <button class="btn btn-primary" type="submit">Guardar cambios</button>
+                        <button class="btn btn-soft" type="button" id="closeEditFunctionsModal">Cerrar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <script>
         const open = document.getElementById('openDecreeModal');
         const close = document.getElementById('closeDecreeModal');
@@ -730,6 +975,190 @@ if (count($agreements) > 0) {
             bg.addEventListener('click', function (e) {
                 if (e.target === bg) {
                     bg.style.display = 'none';
+                }
+            });
+        }
+
+        function createFunctionRow(value, hiddenId) {
+            const row = document.createElement('div');
+            row.className = 'fn-row';
+
+            const idInput = document.createElement('input');
+            idInput.type = 'hidden';
+            idInput.name = hiddenId ? 'function_ids[]' : '';
+            idInput.value = hiddenId || '0';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = value || '';
+            input.placeholder = 'Describe una funcion...';
+
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn-danger';
+            remove.textContent = 'Quitar';
+            remove.addEventListener('click', () => {
+                row.remove();
+            });
+
+            row.appendChild(idInput);
+            row.appendChild(input);
+            row.appendChild(remove);
+
+            row.getValue = () => input.value.trim();
+            row.getIdValue = () => idInput.value;
+            row.bindForEdit = () => {
+                idInput.name = 'function_ids[]';
+                input.name = 'function_texts[]';
+            };
+
+            return row;
+        }
+
+        const createModalBg = document.getElementById('createFunctionsModalBg');
+        const createRows = document.getElementById('createFunctionsRows');
+        const createHidden = document.getElementById('createFunctionsHidden');
+        const createPreview = document.getElementById('createFunctionsPreview');
+        const openCreateModal = document.getElementById('openCreateFunctionsModal');
+        const closeCreateModal = document.getElementById('closeCreateFunctionsModal');
+        const addCreateRow = document.getElementById('addCreateFunctionRow');
+        const saveCreateRows = document.getElementById('saveCreateFunctions');
+
+        function rebuildCreatePreview(values) {
+            createPreview.innerHTML = '';
+            if (values.length === 0) {
+                const p = document.createElement('p');
+                p.className = 'fn-empty';
+                p.textContent = 'Aun no agregas funciones.';
+                createPreview.appendChild(p);
+                return;
+            }
+            values.forEach((txt) => {
+                const chip = document.createElement('span');
+                chip.className = 'list-chip';
+                chip.textContent = txt;
+                createPreview.appendChild(chip);
+            });
+        }
+
+        function syncCreateHidden(values) {
+            createHidden.innerHTML = '';
+            values.forEach((txt) => {
+                const hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = 'functions_items[]';
+                hidden.value = txt;
+                createHidden.appendChild(hidden);
+            });
+        }
+
+        function currentCreateValues() {
+            const values = [];
+            const rows = createRows.querySelectorAll('.fn-row');
+            rows.forEach((row) => {
+                const v = row.getValue();
+                if (v !== '') {
+                    values.push(v);
+                }
+            });
+            return values;
+        }
+
+        function openCreateFunctionsModal() {
+            if (!createRows) {
+                return;
+            }
+            if (createRows.children.length === 0) {
+                createRows.appendChild(createFunctionRow('', 0));
+            }
+            createModalBg.style.display = 'flex';
+        }
+
+        if (openCreateModal && closeCreateModal && addCreateRow && saveCreateRows && createModalBg) {
+            openCreateModal.addEventListener('click', openCreateFunctionsModal);
+            closeCreateModal.addEventListener('click', () => {
+                createModalBg.style.display = 'none';
+            });
+            addCreateRow.addEventListener('click', () => {
+                createRows.appendChild(createFunctionRow('', 0));
+            });
+            saveCreateRows.addEventListener('click', () => {
+                const values = currentCreateValues();
+                syncCreateHidden(values);
+                rebuildCreatePreview(values);
+                createModalBg.style.display = 'none';
+            });
+            createModalBg.addEventListener('click', (e) => {
+                if (e.target === createModalBg) {
+                    createModalBg.style.display = 'none';
+                }
+            });
+
+            rebuildCreatePreview([]);
+            syncCreateHidden([]);
+        }
+
+        const editModalBg = document.getElementById('editFunctionsModalBg');
+        const editRows = document.getElementById('editFunctionsRows');
+        const editAgreementId = document.getElementById('editAgreementId');
+        const editTitle = document.getElementById('editFunctionsTitle');
+        const openEditButtons = document.querySelectorAll('.openEditFunctionsModal');
+        const closeEditModal = document.getElementById('closeEditFunctionsModal');
+        const addEditRow = document.getElementById('addEditFunctionRow');
+
+        function addEditRowWithData(id, text) {
+            const row = createFunctionRow(text, id);
+            row.bindForEdit();
+            editRows.appendChild(row);
+        }
+
+        if (editModalBg && editRows && editAgreementId && editTitle) {
+            openEditButtons.forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const agreementId = btn.getAttribute('data-agreement-id') || '0';
+                    const agreementNumber = btn.getAttribute('data-agreement-number') || 'Convenio';
+                    const functionsRaw = btn.getAttribute('data-functions') || '[]';
+
+                    let fnList = [];
+                    try {
+                        fnList = JSON.parse(functionsRaw);
+                    } catch (e) {
+                        fnList = [];
+                    }
+
+                    editRows.innerHTML = '';
+                    editAgreementId.value = agreementId;
+                    editTitle.textContent = 'Editar funciones - ' + agreementNumber;
+
+                    if (fnList.length === 0) {
+                        addEditRowWithData(0, '');
+                    } else {
+                        fnList.forEach((item) => {
+                            const id = item && item.id ? Number(item.id) : 0;
+                            const text = item && item.text ? String(item.text) : '';
+                            addEditRowWithData(id, text);
+                        });
+                    }
+
+                    editModalBg.style.display = 'flex';
+                });
+            });
+
+            if (closeEditModal) {
+                closeEditModal.addEventListener('click', () => {
+                    editModalBg.style.display = 'none';
+                });
+            }
+
+            if (addEditRow) {
+                addEditRow.addEventListener('click', () => {
+                    addEditRowWithData(0, '');
+                });
+            }
+
+            editModalBg.addEventListener('click', (e) => {
+                if (e.target === editModalBg) {
+                    editModalBg.style.display = 'none';
                 }
             });
         }
