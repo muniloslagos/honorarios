@@ -60,7 +60,7 @@ function envValue(string $key, ?string $default = null): ?string
 
 function appUrl(string $path = ''): string
 {
-    $base = rtrim(envValue('APP_URL', 'https://app.muniloslagos.cl/honorarios') ?? 'https://app.muniloslagos.cl/honorarios', '/');
+    $base = rtrim(envValue('APP_URL', 'https://app.muniloslagos.cl/sgh') ?? 'https://app.muniloslagos.cl/sgh', '/');
     $path = ltrim($path, '/');
 
     return $path === '' ? $base : $base . '/' . $path;

@@ -22,11 +22,11 @@ Ejemplo:
 
 ```env
 APP_NAME=Personal a Honorarios
-APP_URL=https://app.muniloslagos.cl/honorarios
+APP_URL=https://app.muniloslagos.cl/sgh
 
 CU_CLIENT_ID=tu_client_id
 CU_CLIENT_SECRET=tu_client_secret
-CU_REDIRECT_URI=https://app.muniloslagos.cl/honorarios/callback.php
+CU_REDIRECT_URI=https://app.muniloslagos.cl/sgh/callback.php
 
 CU_AUTH_URL=https://accounts.claveunica.gob.cl/openid/authorize/
 CU_TOKEN_URL=https://accounts.claveunica.gob.cl/openid/token/
@@ -39,13 +39,13 @@ HONORARIO_RUN_WHITELIST=12345678-9,11111111-1
 
 En el portal de integracion, la URI de retorno debe ser exactamente:
 
-- `https://app.muniloslagos.cl/honorarios/callback.php`
+- `https://app.muniloslagos.cl/sgh/callback.php`
 
 Si usas otro dominio/puerto/ruta, actualiza tambien `APP_URL` y `CU_REDIRECT_URI`.
 
 ## 3) Probar login
 
-1. Abre `https://app.muniloslagos.cl/honorarios/`
+1. Abre `https://app.muniloslagos.cl/sgh/`
 2. Presiona "Ingresar con ClaveUnica"
 3. Autentica con ClaveUnica
 4. Si el RUN viene en la respuesta y esta en `HONORARIO_RUN_WHITELIST`, entra al dashboard
@@ -80,7 +80,7 @@ Conclusiones relevantes de la guia oficial:
 3. Para produccion, la Redirect URI debe usar dominio `.gob.cl`.
 4. Si necesitas cambiar la Redirect URI registrada, debes hacerlo en Cerofilas en el tramite de actualizacion de URIs.
 
-Puedes abrir `https://app.muniloslagos.cl/honorarios/diagnostico-claveunica.php` para ver la Redirect URI y la Authorization URL reales que envia el sistema.
+Puedes abrir `https://app.muniloslagos.cl/sgh/diagnostico-claveunica.php` para ver la Redirect URI y la Authorization URL reales que envia el sistema.
 
 ## 5.1) Despliegue en servidor
 
@@ -90,7 +90,7 @@ Pasos:
 
 1. Copia `.env.example` a `.env` en el servidor.
 2. Completa `CU_CLIENT_ID`, `CU_CLIENT_SECRET` y `HONORARIO_RUN_WHITELIST`.
-3. Verifica que `APP_URL` y `CU_REDIRECT_URI` sigan apuntando a `https://app.muniloslagos.cl/honorarios`.
+3. Verifica que `APP_URL` y `CU_REDIRECT_URI` sigan apuntando a `https://app.muniloslagos.cl/sgh`.
 
 ## 6) Como agregar usuarios que pueden ingresar
 
