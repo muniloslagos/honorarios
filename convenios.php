@@ -313,6 +313,7 @@ if (count($agreements) > 0) {
             --radius-lg: 16px;
             --radius-md: 10px;
             --shadow-card: 0 14px 38px rgba(14, 71, 113, .08);
+            --sidebar-width: 280px;
         }
 
         body {
@@ -323,6 +324,80 @@ if (count($agreements) > 0) {
                 radial-gradient(1000px 380px at 120% -15%, #e4f3f3 0%, transparent 58%),
                 var(--c-bg);
             font-family: "Segoe UI", system-ui, sans-serif;
+        }
+
+        .shell {
+            min-height: 100vh;
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .sidebar {
+            width: var(--sidebar-width);
+            min-height: 100vh;
+            position: sticky;
+            top: 0;
+            align-self: flex-start;
+            padding: 22px 18px;
+            border-right: 1px solid var(--c-border);
+            background: rgba(255,255,255,.8);
+            backdrop-filter: blur(10px);
+            overflow-y: auto;
+        }
+
+        .sidebar-brand {
+            margin: 0 0 4px;
+            font-size: 1.03rem;
+            font-weight: 800;
+            color: var(--c-primary-dark);
+        }
+
+        .sidebar-subtitle {
+            margin: 0 0 16px;
+            color: var(--c-muted);
+            font-size: .92rem;
+        }
+
+        .sidebar-menu {
+            display: grid;
+            gap: 8px;
+        }
+
+        .sidebar-link {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            padding: 11px 12px;
+            border-radius: 12px;
+            border: 1px solid var(--c-border);
+            background: #fff;
+            color: var(--c-text);
+            text-decoration: none;
+            font-weight: 700;
+            font-size: .92rem;
+        }
+
+        .sidebar-link.active {
+            background: linear-gradient(120deg, #ecf8fa, #f8fbff);
+            border-color: #cfe5ef;
+            color: var(--c-primary-dark);
+        }
+
+        .sidebar-tag {
+            flex-shrink: 0;
+            font-size: .74rem;
+            font-weight: 800;
+            color: var(--c-muted);
+            border: 1px solid var(--c-border);
+            border-radius: 999px;
+            padding: 2px 8px;
+            white-space: nowrap;
+        }
+
+        .content-shell {
+            flex: 1;
+            min-width: 0;
         }
 
         .topbar {
@@ -709,6 +784,14 @@ if (count($agreements) > 0) {
 
         @media (max-width: 640px) {
             .page { padding: 0 14px; }
+            .shell { display: block; }
+            .sidebar {
+                width: 100%;
+                min-height: auto;
+                position: relative;
+                border-right: 0;
+                border-bottom: 1px solid var(--c-border);
+            }
             .topbar-inner { padding: 12px 14px; }
             .grid { grid-template-columns: 1fr; }
             .actions .btn { flex: 1 1 auto; }
@@ -717,27 +800,117 @@ if (count($agreements) > 0) {
     </style>
 </head>
 <body>
-    <header class="topbar">
-        <div class="topbar-inner">
-            <a class="brand" href="dashboard.php">Honorarios • Convenios</a>
-            <nav class="actions">
-                <a class="btn btn-soft" href="dashboard.php">Volver dashboard</a>
-                <a class="btn btn-soft" href="decretos.php">Ver decretos</a>
-                <a class="btn btn-primary" href="informe_mensual.php">Crear informe</a>
+    <div class="shell">
+        <aside class="sidebar">
+            <h2 class="sidebar-brand">Personal a Honorarios</h2>
+            <p class="sidebar-subtitle">Panel del perfil Honorario</p>
+            <nav class="sidebar-menu" aria-label="Menu principal">
+                <a class="sidebar-link" href="dashboard.php">Inicio <span class="sidebar-tag">Home</span></a>
+                <a class="sidebar-link active" href="convenios.php">Mis convenios <span class="sidebar-tag">Activo</span></a>
+                <a class="sidebar-link" href="decretos.php">Mis decretos <span class="sidebar-tag">Activo</span></a>
+                <a class="sidebar-link" href="informe_mensual.php">Informe mensual <span class="sidebar-tag">Prioridad</span></a>
+                <a class="sidebar-link" href="#">Carga PDF firmado <span class="sidebar-tag">Prox.</span></a>
+                <a class="sidebar-link" href="#">Historial <span class="sidebar-tag">Prox.</span></a>
             </nav>
-        </div>
-    </header>
+        </aside>
 
-    <main class="page">
-        <div class="page-header">
-            <h1 class="page-title">Convenios</h1>
-            <p class="page-subtitle">Registra tus convenios, funciones y documentos de respaldo en una sola vista clara para seguimiento mensual.</p>
-        </div>
+        <div class="content-shell">
+            <header class="topbar">
+                <div class="topbar-inner">
+                    <a class="brand" href="dashboard.php">Honorarios • Convenios</a>
+                    <nav class="actions">
+                        <a class="btn btn-soft" href="dashboard.php">Volver dashboard</a>
+                        <a class="btn btn-soft" href="decretos.php">Ver decretos</a>
+                        <a class="btn btn-primary" href="#agregar-convenio">Agregar Convenio</a>
+                    </nav>
+                </div>
+            </header>
 
-        <?php if ($success !== ''): ?><div class="alert alert-ok"><?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
-        <?php if ($error !== ''): ?><div class="alert alert-err"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
+            <main class="page">
+                <div class="page-header">
+                    <h1 class="page-title">Convenios</h1>
+                    <p class="page-subtitle">Registra tus convenios, funciones y documentos de respaldo en una sola vista clara para seguimiento mensual.</p>
+                </div>
 
-        <section class="card">
+            <?php if ($success !== ''): ?><div class="alert alert-ok"><?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
+            <?php if ($error !== ''): ?><div class="alert alert-err"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
+
+            <section class="card">
+            <div class="card-head">
+                <h2>Mis convenios</h2>
+                <span style="color: var(--c-muted); font-size: .84rem; font-weight: 700;">
+                    <?php echo count($agreements); ?> convenio<?php echo count($agreements) !== 1 ? 's' : ''; ?>
+                </span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Convenio</th>
+                            <th>Vigencia</th>
+                            <th>Decreto</th>
+                            <th>Funciones</th>
+                            <th>PDF</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($agreements as $a): ?>
+                            <?php
+                                $status = resolveAgreementStatus((string) $a['start_date'], (string) $a['end_date']);
+                                $statusClass = $status === 'VIGENTE' ? 'status-vigente' : ($status === 'PENDIENTE_FIRMA' ? 'status-pendiente' : 'status-no-vigente');
+                            ?>
+                            <tr>
+                                <td>
+                                    <p class="agreement-title"><?php echo htmlspecialchars((string) $a['agreement_number'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                    <p class="agreement-meta"><?php echo htmlspecialchars((string) $a['program_item'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                    <p class="agreement-meta" style="margin-top: 6px;">
+                                        <span class="status-badge <?php echo $statusClass; ?>"><?php echo htmlspecialchars($status, ENT_QUOTES, 'UTF-8'); ?></span>
+                                    </p>
+                                </td>
+                                <td><?php echo htmlspecialchars((string) $a['start_date'] . ' a ' . (string) $a['end_date'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><?php echo htmlspecialchars((string) ($a['decree_number'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td>
+                                    <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
+                                    <?php foreach ($items as $fn): ?>
+                                        <span class="list-chip"><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></span>
+                                    <?php endforeach; ?>
+                                    <?php if (count($items) === 0): ?>
+                                        <span class="agreement-meta">Sin funciones registradas</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if (!empty($a['pdf_path'])): ?>
+                                        <a class="pdf-link" href="<?php echo htmlspecialchars((string) $a['pdf_path'], ENT_QUOTES, 'UTF-8'); ?>" target="_blank" rel="noopener">Ver PDF</a>
+                                    <?php else: ?>
+                                        <span class="agreement-meta">Sin archivo</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
+                                    <button
+                                        class="btn btn-link openEditFunctionsModal"
+                                        type="button"
+                                        data-agreement-id="<?php echo (int) $a['id']; ?>"
+                                        data-agreement-number="<?php echo htmlspecialchars((string) $a['agreement_number'], ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-functions="<?php echo htmlspecialchars((string) json_encode($items, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8'); ?>"
+                                    >
+                                        Editar funciones
+                                    </button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        <?php if (count($agreements) === 0): ?>
+                            <tr>
+                                <td colspan="6" class="empty">No hay convenios registrados.</td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+            </section>
+
+            <section class="card" id="agregar-convenio">
             <div class="card-head">
                 <h2>Agregar convenio</h2>
             </div>
@@ -812,83 +985,10 @@ if (count($agreements) > 0) {
                     </div>
                 </form>
             </div>
-        </section>
-
-        <section class="card">
-            <div class="card-head">
-                <h2>Mis convenios</h2>
-                <span style="color: var(--c-muted); font-size: .84rem; font-weight: 700;">
-                    <?php echo count($agreements); ?> convenio<?php echo count($agreements) !== 1 ? 's' : ''; ?>
-                </span>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Convenio</th>
-                            <th>Vigencia</th>
-                            <th>Decreto</th>
-                            <th>Funciones</th>
-                            <th>PDF</th>
-                            <th>Acciones</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($agreements as $a): ?>
-                            <?php
-                                $status = resolveAgreementStatus((string) $a['start_date'], (string) $a['end_date']);
-                                $statusClass = $status === 'VIGENTE' ? 'status-vigente' : ($status === 'PENDIENTE_FIRMA' ? 'status-pendiente' : 'status-no-vigente');
-                            ?>
-                            <tr>
-                                <td>
-                                    <p class="agreement-title"><?php echo htmlspecialchars((string) $a['agreement_number'], ENT_QUOTES, 'UTF-8'); ?></p>
-                                    <p class="agreement-meta"><?php echo htmlspecialchars((string) $a['program_item'], ENT_QUOTES, 'UTF-8'); ?></p>
-                                    <p class="agreement-meta" style="margin-top: 6px;">
-                                        <span class="status-badge <?php echo $statusClass; ?>"><?php echo htmlspecialchars($status, ENT_QUOTES, 'UTF-8'); ?></span>
-                                    </p>
-                                </td>
-                                <td><?php echo htmlspecialchars((string) $a['start_date'] . ' a ' . (string) $a['end_date'], ENT_QUOTES, 'UTF-8'); ?></td>
-                                <td><?php echo htmlspecialchars((string) ($a['decree_number'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></td>
-                                <td>
-                                    <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
-                                    <?php foreach ($items as $fn): ?>
-                                        <span class="list-chip"><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></span>
-                                    <?php endforeach; ?>
-                                    <?php if (count($items) === 0): ?>
-                                        <span class="agreement-meta">Sin funciones registradas</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php if (!empty($a['pdf_path'])): ?>
-                                        <a class="pdf-link" href="<?php echo htmlspecialchars((string) $a['pdf_path'], ENT_QUOTES, 'UTF-8'); ?>" target="_blank" rel="noopener">Ver PDF</a>
-                                    <?php else: ?>
-                                        <span class="agreement-meta">Sin archivo</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php $items = $functionsByAgreement[(int) $a['id']] ?? []; ?>
-                                    <button
-                                        class="btn btn-link openEditFunctionsModal"
-                                        type="button"
-                                        data-agreement-id="<?php echo (int) $a['id']; ?>"
-                                        data-agreement-number="<?php echo htmlspecialchars((string) $a['agreement_number'], ENT_QUOTES, 'UTF-8'); ?>"
-                                        data-functions="<?php echo htmlspecialchars((string) json_encode($items, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8'); ?>"
-                                    >
-                                        Editar funciones
-                                    </button>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                        <?php if (count($agreements) === 0): ?>
-                            <tr>
-                                <td colspan="6" class="empty">No hay convenios registrados.</td>
-                            </tr>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    </main>
+                </section>
+            </main>
+        </div>
+    </div>
 
     <div id="decreeModalBg" class="modal-bg" aria-hidden="true">
         <div class="modal">

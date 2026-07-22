@@ -294,6 +294,80 @@ function statusBadge(string $s): string
             min-height: 100vh;
         }
 
+        .shell {
+            min-height: 100vh;
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .sidebar {
+            width: 280px;
+            min-height: 100vh;
+            position: sticky;
+            top: 0;
+            align-self: flex-start;
+            padding: 22px 18px;
+            border-right: 1px solid var(--border);
+            background: rgba(255,255,255,.84);
+            backdrop-filter: blur(10px);
+            overflow-y: auto;
+        }
+
+        .sidebar-brand {
+            margin: 0 0 4px;
+            font-size: 1.03rem;
+            font-weight: 800;
+            color: var(--primary-hover);
+        }
+
+        .sidebar-subtitle {
+            margin: 0 0 16px;
+            color: var(--text-muted);
+            font-size: .92rem;
+        }
+
+        .sidebar-menu {
+            display: grid;
+            gap: 8px;
+        }
+
+        .sidebar-link {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            padding: 11px 12px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #fff;
+            color: var(--text);
+            text-decoration: none;
+            font-weight: 700;
+            font-size: .92rem;
+        }
+
+        .sidebar-link.active {
+            background: linear-gradient(120deg, #ecf8fa, #f8fbff);
+            border-color: #cfe5ef;
+            color: var(--primary-hover);
+        }
+
+        .sidebar-tag {
+            flex-shrink: 0;
+            font-size: .74rem;
+            font-weight: 800;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 2px 8px;
+            white-space: nowrap;
+        }
+
+        .content-shell {
+            flex: 1;
+            min-width: 0;
+        }
+
         /* ── Topbar ── */
         .topbar {
             background: var(--surface);
@@ -626,6 +700,14 @@ function statusBadge(string $s): string
 
         /* ── Responsive ── */
         @media (max-width: 860px) {
+            .shell { display: block; }
+            .sidebar {
+                width: 100%;
+                min-height: auto;
+                position: relative;
+                border-right: 0;
+                border-bottom: 1px solid var(--border);
+            }
             .field-group, .field-group-3, .field-group-4 { grid-template-columns: 1fr 1fr; }
             .col-span-2, .col-span-3 { grid-column: span 2; }
         }
@@ -637,42 +719,56 @@ function statusBadge(string $s): string
     </style>
 </head>
 <body>
+    <div class="shell">
+        <aside class="sidebar">
+            <h2 class="sidebar-brand">Personal a Honorarios</h2>
+            <p class="sidebar-subtitle">Panel del perfil Honorario</p>
+            <nav class="sidebar-menu" aria-label="Menu principal">
+                <a class="sidebar-link" href="dashboard.php">Inicio <span class="sidebar-tag">Home</span></a>
+                <a class="sidebar-link" href="convenios.php">Mis convenios <span class="sidebar-tag">Activo</span></a>
+                <a class="sidebar-link" href="decretos.php">Mis decretos <span class="sidebar-tag">Activo</span></a>
+                <a class="sidebar-link active" href="informe_mensual.php">Informe mensual <span class="sidebar-tag">Prioridad</span></a>
+                <a class="sidebar-link" href="#">Carga PDF firmado <span class="sidebar-tag">Prox.</span></a>
+                <a class="sidebar-link" href="#">Historial <span class="sidebar-tag">Prox.</span></a>
+            </nav>
+        </aside>
 
-    <header class="topbar">
-        <a class="topbar-brand" href="dashboard.php">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
-            </svg>
-            Honorarios
-        </a>
-        <nav class="topbar-nav">
-            <a class="btn btn-ghost btn-sm" href="dashboard.php">Dashboard</a>
-            <a class="btn btn-ghost btn-sm" href="convenios.php">Convenios</a>
-            <a class="btn btn-ghost btn-sm" href="decretos.php">Decretos</a>
-        </nav>
-    </header>
+        <div class="content-shell">
+            <header class="topbar">
+                <a class="topbar-brand" href="dashboard.php">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+                    </svg>
+                    Honorarios
+                </a>
+                <nav class="topbar-nav">
+                    <a class="btn btn-ghost btn-sm" href="dashboard.php">Dashboard</a>
+                    <a class="btn btn-ghost btn-sm" href="convenios.php">Convenios</a>
+                    <a class="btn btn-ghost btn-sm" href="decretos.php">Decretos</a>
+                </nav>
+            </header>
 
-    <main class="page">
+            <main class="page">
 
-        <div class="page-header">
-            <div>
-                <h1 class="page-title">Informe mensual</h1>
-                <p class="page-subtitle">Registra y gestiona tus informes de actividades mensuales</p>
-            </div>
-        </div>
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">Informe mensual</h1>
+                        <p class="page-subtitle">Registra y gestiona tus informes de actividades mensuales</p>
+                    </div>
+                </div>
 
-        <?php if ($success !== ''): ?>
-        <div class="alert alert-ok">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?>
-        </div>
-        <?php endif; ?>
-        <?php if ($error !== ''): ?>
-        <div class="alert alert-err">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?>
-        </div>
-        <?php endif; ?>
+                <?php if ($success !== ''): ?>
+                <div class="alert alert-ok">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    <?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?>
+                </div>
+                <?php endif; ?>
+                <?php if ($error !== ''): ?>
+                <div class="alert alert-err">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?>
+                </div>
+                <?php endif; ?>
 
         <!-- Formulario -->
         <div class="card">
@@ -883,7 +979,9 @@ function statusBadge(string $s): string
             </div>
         </div>
 
-    </main>
+            </main>
+        </div>
+    </div>
 
     <script>
         const srcConvenio    = document.getElementById('srcConvenio');
