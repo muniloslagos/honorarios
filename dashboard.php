@@ -86,41 +86,60 @@ $loggedAt = htmlspecialchars((string) ($user['logged_at'] ?? ''), ENT_QUOTES, 'U
 
         function statusLabel(string $status): string
         {
-            return match ($status) {
-                'NO_INICIADO' => 'No iniciado',
-                'BORRADOR' => 'Borrador',
-                'ENVIADO' => 'Enviado',
-                'OBSERVADO' => 'Observado',
-                'APROBADO' => 'Aprobado',
-                'RECHAZADO' => 'Rechazado',
-                default => 'Sin estado',
-            };
+            switch ($status) {
+                case 'NO_INICIADO':
+                    return 'No iniciado';
+                case 'BORRADOR':
+                    return 'Borrador';
+                case 'ENVIADO':
+                    return 'Enviado';
+                case 'OBSERVADO':
+                    return 'Observado';
+                case 'APROBADO':
+                    return 'Aprobado';
+                case 'RECHAZADO':
+                    return 'Rechazado';
+                default:
+                    return 'Sin estado';
+            }
         }
 
         function statusClass(string $status): string
         {
-            return match ($status) {
-                'NO_INICIADO' => 'neutral',
-                'BORRADOR' => 'info',
-                'ENVIADO' => 'info',
-                'OBSERVADO' => 'warn',
-                'APROBADO' => 'ok',
-                'RECHAZADO' => 'danger',
-                default => 'neutral',
-            };
+            switch ($status) {
+                case 'BORRADOR':
+                case 'ENVIADO':
+                    return 'info';
+                case 'OBSERVADO':
+                    return 'warn';
+                case 'APROBADO':
+                    return 'ok';
+                case 'RECHAZADO':
+                    return 'danger';
+                case 'NO_INICIADO':
+                default:
+                    return 'neutral';
+            }
         }
 
         function resolveMainAction(string $status): array
         {
-            return match ($status) {
-                'NO_INICIADO' => ['Crear informe de este mes', '#'],
-                'BORRADOR' => ['Continuar borrador', '#'],
-                'ENVIADO' => ['Ver envio realizado', '#'],
-                'OBSERVADO' => ['Corregir informe observado', '#'],
-                'APROBADO' => ['Revisar historial del mes', '#'],
-                'RECHAZADO' => ['Crear nuevo informe', '#'],
-                default => ['Ir a informes', '#'],
-            };
+            switch ($status) {
+                case 'NO_INICIADO':
+                    return ['Crear informe de este mes', '#'];
+                case 'BORRADOR':
+                    return ['Continuar borrador', '#'];
+                case 'ENVIADO':
+                    return ['Ver envio realizado', '#'];
+                case 'OBSERVADO':
+                    return ['Corregir informe observado', '#'];
+                case 'APROBADO':
+                    return ['Revisar historial del mes', '#'];
+                case 'RECHAZADO':
+                    return ['Crear nuevo informe', '#'];
+                default:
+                    return ['Ir a informes', '#'];
+            }
         }
 
         $activeCount = count($activeConvenios);
