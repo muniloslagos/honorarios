@@ -17,6 +17,7 @@ Esta primera etapa implementa:
 - `CU_REDIRECT_URI`: debe coincidir exactamente con la registrada en ClaveUnica
 - `CU_AUTH_URL`, `CU_TOKEN_URL`, `CU_USERINFO_URL`: endpoints de tu integracion
 - `HONORARIO_RUN_WHITELIST`: RUN permitidos para entrar como HONORARIO, separados por coma
+- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`: conexion a MySQL
 
 Ejemplo:
 
@@ -31,6 +32,12 @@ CU_REDIRECT_URI=https://app.muniloslagos.cl/sgh/auth/callback
 CU_AUTH_URL=https://accounts.claveunica.gob.cl/openid/authorize/
 CU_TOKEN_URL=https://accounts.claveunica.gob.cl/openid/token/
 CU_USERINFO_URL=https://accounts.claveunica.gob.cl/openid/userinfo/
+
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_NAME=appmuniloslagos_sgh
+DB_USER=appmuniloslagos_sgh
+DB_PASS=tu_password_mysql
 
 HONORARIO_RUN_WHITELIST=12345678-9,11111111-1
 ```
@@ -158,6 +165,19 @@ Con esto quedan creadas las tablas para:
 - actividades del informe (en desarrollo)
 - archivos de informe
 - auditoria
+
+## Pantallas operativas (perfil Honorario)
+
+- `convenios.php`: agregar y listar convenios
+- `decretos.php`: agregar y listar decretos
+- `informe_mensual.php`: crear informe mensual con origen manual o convenio
+
+Reglas en la creacion de informe:
+
+- Se permite mas de un informe en el mismo mes/anio para un usuario.
+- Si usa `source_type=CONVENIO`, no puede repetirse el mismo convenio para el mismo mes/anio.
+- Si es `MANUAL`, no aplica esa validacion.
+- Al crear informe, la carga de actividades queda en estado "En desarrollo".
 
 Reglas aplicadas para `monthly_reports`:
 

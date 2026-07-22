@@ -110,19 +110,19 @@ function resolveMainAction(string $status): array
 {
     switch ($status) {
         case 'NO_INICIADO':
-            return ['Crear informe de este mes', '#'];
+            return ['Crear informe de este mes', 'informe_mensual.php'];
         case 'BORRADOR':
-            return ['Continuar borrador', '#'];
+            return ['Continuar borrador', 'informe_mensual.php'];
         case 'ENVIADO':
-            return ['Ver envio realizado', '#'];
+            return ['Ver envio realizado', 'informe_mensual.php'];
         case 'OBSERVADO':
-            return ['Corregir informe observado', '#'];
+            return ['Corregir informe observado', 'informe_mensual.php'];
         case 'APROBADO':
-            return ['Revisar historial del mes', '#'];
+            return ['Revisar historial del mes', 'informe_mensual.php'];
         case 'RECHAZADO':
-            return ['Crear nuevo informe', '#'];
+            return ['Crear nuevo informe', 'informe_mensual.php'];
         default:
-            return ['Ir a informes', '#'];
+            return ['Ir a informes', 'informe_mensual.php'];
     }
 }
 
@@ -411,9 +411,9 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
 
             <nav class="menu" aria-label="Menu principal">
                 <a class="menu-item active" href="dashboard.php">Inicio <span class="menu-tag">Home</span></a>
-                <a class="menu-item" href="#">Mis convenios <span class="menu-tag">Prox.</span></a>
-                <a class="menu-item" href="#">Mis decretos <span class="menu-tag">Prox.</span></a>
-                <a class="menu-item" href="#">Informe mensual <span class="menu-tag">Prioridad</span></a>
+                <a class="menu-item" href="convenios.php">Mis convenios <span class="menu-tag">Activo</span></a>
+                <a class="menu-item" href="decretos.php">Mis decretos <span class="menu-tag">Activo</span></a>
+                <a class="menu-item" href="informe_mensual.php">Informe mensual <span class="menu-tag">Prioridad</span></a>
                 <a class="menu-item" href="#">Carga PDF firmado <span class="menu-tag">Prox.</span></a>
                 <a class="menu-item" href="#">Historial <span class="menu-tag">Prox.</span></a>
             </nav>
@@ -434,7 +434,7 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
                 <p>Tu estado operativo de <?php echo htmlspecialchars($currentMonthLabel, ENT_QUOTES, 'UTF-8'); ?> ya esta disponible.</p>
                 <div class="hero-actions">
                     <a class="btn btn-primary" href="<?php echo htmlspecialchars($mainActionLink, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars($mainActionLabel, ENT_QUOTES, 'UTF-8'); ?></a>
-                    <a class="btn btn-ghost" href="#">Ver historial mensual</a>
+                    <a class="btn btn-ghost" href="informe_mensual.php">Ver historial mensual</a>
                 </div>
             </section>
 
@@ -468,7 +468,7 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
                 <article class="panel">
                     <div class="panel-head">
                         <h3>Convenios vigentes</h3>
-                        <a href="#">Ver todos</a>
+                        <a href="convenios.php">Ver todos</a>
                     </div>
 
                     <div class="convenio-list">
@@ -489,7 +489,7 @@ $observationDate = htmlspecialchars(formatDateEs($lastObservation['date']), ENT_
                             <strong><?php echo $observationBy; ?> | <?php echo $observationDate; ?></strong>
                             <p><?php echo $observationExcerpt; ?></p>
                         </div>
-                        <p style="margin:10px 0 0;"><a href="#" style="color:#0f5f95;text-decoration:none;font-weight:700;">Ver detalle y corregir</a></p>
+                        <p style="margin:10px 0 0;"><a href="informe_mensual.php" style="color:#0f5f95;text-decoration:none;font-weight:700;">Ver detalle y corregir</a></p>
                     </article>
 
                     <article class="panel">
