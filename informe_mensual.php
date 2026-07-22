@@ -21,116 +21,230 @@ $agreements = $agreementsStmt->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
-        $month = (int) ($_POST['report_month'] ?? 0);
-        $year = (int) ($_POST['report_year'] ?? 0);
-        $provider = trim((string) ($_POST['provider_name'] ?? ''));
-        $profession = trim((string) ($_POST['profession_experience'] ?? ''));
+        $action = (string) ($_POST['action'] ?? 'create_report');
 
-        $sourceType = (string) ($_POST['source_type'] ?? 'CONVENIO');
-        if ($sourceType !== 'MANUAL' && $sourceType !== 'CONVENIO') {
-            $sourceType = 'CONVENIO';
-        }
+        if ($action === 'create_report') {
+            $month = (int) ($_POST['report_month'] ?? 0);
+            $year = (int) ($_POST['report_year'] ?? 0);
+            $provider = trim((string) ($_POST['provider_name'] ?? ''));
+            $profession = trim((string) ($_POST['profession_experience'] ?? ''));
 
-        $agreementIdRaw = trim((string) ($_POST['agreement_id'] ?? ''));
-        $agreementId = $agreementIdRaw !== '' ? (int) $agreementIdRaw : null;
-
-        $programText = trim((string) ($_POST['program_activity_text'] ?? ''));
-        $decreeText = trim((string) ($_POST['decree_number_text'] ?? ''));
-        $startDate = trim((string) ($_POST['agreement_start_date'] ?? ''));
-        $endDate = trim((string) ($_POST['agreement_end_date'] ?? ''));
-        $installmentRaw = trim((string) ($_POST['installment_number'] ?? ''));
-        $installment = $installmentRaw !== '' ? (int) $installmentRaw : null;
-
-        if ($month < 1 || $month > 12 || $year < 2020) {
-            throw new RuntimeException('Mes o anio invalido.');
-        }
-        if ($provider === '' || $profession === '') {
-            throw new RuntimeException('Nombre prestador y profesion/oficio son obligatorios.');
-        }
-        if ($programText === '') {
-            throw new RuntimeException('Debes informar programa, convenio y/o actividad.');
-        }
-        if ($startDate === '' || $endDate === '') {
-            throw new RuntimeException('Debes ingresar vigencia inicio y fin.');
-        }
-
-        if ($sourceType === 'CONVENIO') {
-            if ($agreementId === null) {
-                throw new RuntimeException('Debes seleccionar convenio para este tipo de informe.');
+            $sourceType = (string) ($_POST['source_type'] ?? 'CONVENIO');
+            if ($sourceType !== 'MANUAL' && $sourceType !== 'CONVENIO') {
+                $sourceType = 'CONVENIO';
             }
 
-            $check = $pdo->prepare('SELECT id FROM monthly_reports WHERE honorario_user_id = :uid AND report_month = :m AND report_year = :y AND source_type = :st AND agreement_id = :aid LIMIT 1');
-            $check->execute([
+            $agreementIdRaw = trim((string) ($_POST['agreement_id'] ?? ''));
+            $agreementId = $agreementIdRaw !== '' ? (int) $agreementIdRaw : null;
+
+            $programText = trim((string) ($_POST['program_activity_text'] ?? ''));
+            $decreeText = trim((string) ($_POST['decree_number_text'] ?? ''));
+            $startDate = trim((string) ($_POST['agreement_start_date'] ?? ''));
+            $endDate = trim((string) ($_POST['agreement_end_date'] ?? ''));
+            $installmentRaw = trim((string) ($_POST['installment_number'] ?? ''));
+            $installment = $installmentRaw !== '' ? (int) $installmentRaw : null;
+
+            if ($month < 1 || $month > 12 || $year < 2020) {
+                throw new RuntimeException('Mes o anio invalido.');
+            }
+            if ($provider === '' || $profession === '') {
+                throw new RuntimeException('Nombre prestador y profesion/oficio son obligatorios.');
+            }
+            if ($programText === '') {
+                throw new RuntimeException('Debes informar programa, convenio y/o actividad.');
+            }
+            if ($startDate === '' || $endDate === '') {
+                throw new RuntimeException('Debes ingresar vigencia inicio y fin.');
+            }
+
+            if ($sourceType === 'CONVENIO') {
+                if ($agreementId === null) {
+                    throw new RuntimeException('Debes seleccionar convenio para este tipo de informe.');
+                }
+
+                $check = $pdo->prepare('SELECT id FROM monthly_reports WHERE honorario_user_id = :uid AND report_month = :m AND report_year = :y AND source_type = :st AND agreement_id = :aid LIMIT 1');
+                $check->execute([
+                    'uid' => $dbUser['id'],
+                    'm' => $month,
+                    'y' => $year,
+                    'st' => 'CONVENIO',
+                    'aid' => $agreementId,
+                ]);
+                if ($check->fetch() !== false) {
+                    throw new RuntimeException('Ya existe un informe para ese convenio en el mes/anio indicado.');
+                }
+            }
+
+            $insert = $pdo->prepare('INSERT INTO monthly_reports (
+                honorario_user_id,
+                report_month,
+                report_year,
+                provider_name,
+                profession_experience,
+                source_type,
+                agreement_id,
+                program_activity_text,
+                decree_number_text,
+                agreement_start_date,
+                agreement_end_date,
+                installment_number,
+                status
+            ) VALUES (
+                :uid,
+                :m,
+                :y,
+                :provider,
+                :profession,
+                :source_type,
+                :agreement_id,
+                :program_text,
+                :decree_text,
+                :start_date,
+                :end_date,
+                :installment,
+                :status
+            )');
+
+            $insert->execute([
                 'uid' => $dbUser['id'],
                 'm' => $month,
                 'y' => $year,
-                'st' => 'CONVENIO',
-                'aid' => $agreementId,
+                'provider' => $provider,
+                'profession' => $profession,
+                'source_type' => $sourceType,
+                'agreement_id' => $sourceType === 'CONVENIO' ? $agreementId : null,
+                'program_text' => $programText,
+                'decree_text' => $decreeText !== '' ? $decreeText : null,
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+                'installment' => $installment,
+                'status' => 'BORRADOR',
             ]);
-            if ($check->fetch() !== false) {
-                throw new RuntimeException('Ya existe un informe para ese convenio en el mes/anio indicado.');
+
+            $success = 'Informe creado en estado BORRADOR. La carga de actividades queda en desarrollo.';
+        } elseif ($action === 'add_functions') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            $selectedFunctions = $_POST['function_items'] ?? [];
+
+            if (!is_array($selectedFunctions) || count($selectedFunctions) === 0) {
+                throw new RuntimeException('Debes seleccionar al menos una funcion del convenio.');
             }
+
+            $reportStmt = $pdo->prepare('SELECT id, source_type, agreement_id FROM monthly_reports WHERE id = :id AND honorario_user_id = :uid LIMIT 1');
+            $reportStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
+            $reportRow = $reportStmt->fetch();
+
+            if ($reportRow === false) {
+                throw new RuntimeException('Informe no encontrado.');
+            }
+            if ((string) $reportRow['source_type'] !== 'CONVENIO' || (int) ($reportRow['agreement_id'] ?? 0) <= 0) {
+                throw new RuntimeException('Solo los informes de origen CONVENIO pueden cargar funciones.');
+            }
+
+            $existingActivities = $pdo->prepare('SELECT COUNT(*) FROM monthly_report_activities WHERE report_id = :rid');
+            $existingActivities->execute(['rid' => $reportId]);
+            if ((int) $existingActivities->fetchColumn() > 0) {
+                throw new RuntimeException('Las funciones para este informe ya fueron cargadas previamente.');
+            }
+
+            $functionIds = array_values(array_unique(array_map(static fn ($v): int => (int) $v, $selectedFunctions)));
+            $functionIds = array_values(array_filter($functionIds, static fn (int $v): bool => $v > 0));
+
+            if (count($functionIds) === 0) {
+                throw new RuntimeException('Seleccion de funciones invalida.');
+            }
+
+            $inParams = implode(',', array_fill(0, count($functionIds), '?'));
+            $functionSql = 'SELECT id, function_text FROM agreement_functions WHERE agreement_id = ? AND id IN (' . $inParams . ') ORDER BY sort_order, id';
+            $functionStmt = $pdo->prepare($functionSql);
+            $functionStmt->execute(array_merge([(int) $reportRow['agreement_id']], $functionIds));
+            $functions = $functionStmt->fetchAll();
+
+            if (count($functions) === 0) {
+                throw new RuntimeException('No se encontraron funciones validas para el convenio seleccionado.');
+            }
+
+            $insertActivity = $pdo->prepare('INSERT INTO monthly_report_activities (report_id, activity_description, sort_order) VALUES (:rid, :desc, :ord)');
+            $sort = 1;
+            foreach ($functions as $fn) {
+                $insertActivity->execute([
+                    'rid' => $reportId,
+                    'desc' => (string) $fn['function_text'],
+                    'ord' => $sort,
+                ]);
+                $sort++;
+            }
+
+            $success = 'Funciones cargadas correctamente. Desde ahora las actividades del informe podran alinearse a esas funciones.';
+        } elseif ($action === 'upload_pdf') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+
+            $reportStmt = $pdo->prepare('SELECT id FROM monthly_reports WHERE id = :id AND honorario_user_id = :uid LIMIT 1');
+            $reportStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
+            if ($reportStmt->fetch() === false) {
+                throw new RuntimeException('Informe no encontrado para adjuntar PDF.');
+            }
+
+            $file = uploadPdf($_FILES['report_pdf'] ?? [], 'reports');
+            if ($file === null) {
+                throw new RuntimeException('Debes seleccionar un PDF para adjuntar.');
+            }
+
+            $sizeBytes = isset($_FILES['report_pdf']['size']) ? (int) $_FILES['report_pdf']['size'] : null;
+            $mimeType = isset($_FILES['report_pdf']['type']) ? (string) $_FILES['report_pdf']['type'] : null;
+
+            $insertFile = $pdo->prepare('INSERT INTO monthly_report_files (report_id, file_type, original_name, stored_path, mime_type, size_bytes) VALUES (:rid, :type, :oname, :spath, :mime, :size)');
+            $insertFile->execute([
+                'rid' => $reportId,
+                'type' => 'RESPALDO',
+                'oname' => (string) $file['original_name'],
+                'spath' => (string) $file['stored_path'],
+                'mime' => $mimeType,
+                'size' => $sizeBytes,
+            ]);
+
+            $success = 'PDF del informe adjuntado correctamente.';
+        } else {
+            throw new RuntimeException('Accion no valida.');
         }
-
-        $insert = $pdo->prepare('INSERT INTO monthly_reports (
-            honorario_user_id,
-            report_month,
-            report_year,
-            provider_name,
-            profession_experience,
-            source_type,
-            agreement_id,
-            program_activity_text,
-            decree_number_text,
-            agreement_start_date,
-            agreement_end_date,
-            installment_number,
-            status
-        ) VALUES (
-            :uid,
-            :m,
-            :y,
-            :provider,
-            :profession,
-            :source_type,
-            :agreement_id,
-            :program_text,
-            :decree_text,
-            :start_date,
-            :end_date,
-            :installment,
-            :status
-        )');
-
-        $insert->execute([
-            'uid' => $dbUser['id'],
-            'm' => $month,
-            'y' => $year,
-            'provider' => $provider,
-            'profession' => $profession,
-            'source_type' => $sourceType,
-            'agreement_id' => $sourceType === 'CONVENIO' ? $agreementId : null,
-            'program_text' => $programText,
-            'decree_text' => $decreeText !== '' ? $decreeText : null,
-            'start_date' => $startDate,
-            'end_date' => $endDate,
-            'installment' => $installment,
-            'status' => 'BORRADOR',
-        ]);
-
-        $success = 'Informe creado en estado BORRADOR. La carga de actividades queda en desarrollo.';
     } catch (Throwable $e) {
         $error = $e->getMessage();
     }
 }
 
-$reportsStmt = $pdo->prepare('SELECT id, report_month, report_year, source_type, status, created_at, agreement_id FROM monthly_reports WHERE honorario_user_id = :uid ORDER BY report_year DESC, report_month DESC, id DESC');
+$reportsStmt = $pdo->prepare('SELECT
+    r.id,
+    r.report_month,
+    r.report_year,
+    r.source_type,
+    r.status,
+    r.created_at,
+    r.agreement_id,
+    (SELECT COUNT(*) FROM monthly_report_activities a WHERE a.report_id = r.id) AS activities_count,
+    (SELECT COUNT(*) FROM monthly_report_files f WHERE f.report_id = r.id AND f.file_type = \'RESPALDO\') AS pdf_count
+FROM monthly_reports r
+WHERE r.honorario_user_id = :uid
+ORDER BY r.report_year DESC, r.report_month DESC, r.id DESC');
 $reportsStmt->execute(['uid' => $dbUser['id']]);
 $reports = $reportsStmt->fetchAll();
 
 $agreementMap = [];
 foreach ($agreements as $a) {
     $agreementMap[(int) $a['id']] = (string) $a['agreement_number'];
+}
+
+$agreementFunctionsMap = [];
+$agreementFunctionsStmt = $pdo->prepare('SELECT agreement_id, id, function_text FROM agreement_functions WHERE agreement_id IN (SELECT id FROM agreements WHERE honorario_user_id = :uid) ORDER BY agreement_id, sort_order, id');
+$agreementFunctionsStmt->execute(['uid' => $dbUser['id']]);
+foreach ($agreementFunctionsStmt->fetchAll() as $fnRow) {
+    $aid = (int) $fnRow['agreement_id'];
+    if (!isset($agreementFunctionsMap[$aid])) {
+        $agreementFunctionsMap[$aid] = [];
+    }
+    $agreementFunctionsMap[$aid][] = [
+        'id' => (int) $fnRow['id'],
+        'text' => (string) $fnRow['function_text'],
+    ];
 }
 
 $monthNames = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
@@ -442,6 +556,73 @@ function statusBadge(string $s): string
             color: var(--text-muted);
             font-size: .92rem;
         }
+        .options-note {
+            margin: 14px 0 18px;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: #f8fafc;
+            display: grid;
+            gap: 8px;
+        }
+        .options-note p {
+            margin: 0;
+            font-size: .86rem;
+            color: #334e68;
+            line-height: 1.35;
+        }
+        .actions-cell {
+            min-width: 360px;
+        }
+        .action-stack {
+            display: grid;
+            gap: 8px;
+        }
+        .action-box {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px;
+            background: #ffffff;
+        }
+        .action-box h4 {
+            margin: 0 0 6px;
+            font-size: .82rem;
+            color: #334e68;
+        }
+        .action-box p {
+            margin: 0 0 8px;
+            font-size: .78rem;
+            color: #627d98;
+            line-height: 1.35;
+        }
+        .functions-list {
+            display: grid;
+            gap: 6px;
+            margin-bottom: 8px;
+            max-height: 140px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+        .fn-check {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            font-size: .78rem;
+            color: #334e68;
+        }
+        .fn-check input {
+            margin-top: 2px;
+        }
+        .upload-inline {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .upload-inline input[type="file"] {
+            max-width: 220px;
+            font-size: .76rem;
+        }
 
         /* ── Responsive ── */
         @media (max-width: 860px) {
@@ -500,6 +681,7 @@ function statusBadge(string $s): string
             </div>
             <div class="card-body">
                 <form method="post" id="reportForm">
+                    <input type="hidden" name="action" value="create_report">
 
                     <p class="form-section-title">Datos del periodo y prestador</p>
                     <div class="field-group field-group-4">
@@ -603,6 +785,12 @@ function statusBadge(string $s): string
                 <h2><span class="step">2</span> Informes registrados</h2>
                 <span style="font-size:.82rem;color:var(--text-muted);"><?php echo count($reports); ?> informe<?php echo count($reports) !== 1 ? 's' : ''; ?></span>
             </div>
+            <div class="card-body" style="padding-bottom: 0;">
+                <div class="options-note">
+                    <p><strong>Opcion 1: Generar informe en el sistema.</strong> Esta opcion crea una base de actividades a partir de las funciones definidas en el convenio. Debes seleccionar funciones que mantengan coherencia entre lo pactado en el convenio y las actividades que declararas en el informe mensual. Esta carga se realiza una sola vez por informe y solo aplica a informes con origen CONVENIO.</p>
+                    <p><strong>Opcion 2: Agregar informe en PDF.</strong> Esta opcion permite adjuntar directamente el informe ya preparado fuera del sistema (por ejemplo, en Word y luego exportado a PDF), dejando respaldo formal del documento final.</p>
+                </div>
+            </div>
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -612,27 +800,80 @@ function statusBadge(string $s): string
                             <th>Convenio</th>
                             <th>Estado</th>
                             <th>Actividades</th>
+                            <th>Acciones</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach ($reports as $r): ?>
+                        <?php
+                            $reportId = (int) $r['id'];
+                            $agreementId = (int) ($r['agreement_id'] ?? 0);
+                            $isConvenio = (string) $r['source_type'] === 'CONVENIO';
+                            $hasActivities = (int) ($r['activities_count'] ?? 0) > 0;
+                            $functionsForAgreement = $agreementFunctionsMap[$agreementId] ?? [];
+                        ?>
                         <tr>
                             <td class="td-period">
                                 <?php echo htmlspecialchars($monthNames[(int) $r['report_month']] ?? (string) $r['report_month'], ENT_QUOTES, 'UTF-8'); ?>
                                 <?php echo htmlspecialchars((string) $r['report_year'], ENT_QUOTES, 'UTF-8'); ?>
                             </td>
                             <td>
-                                <span class="td-origin <?php echo $r['source_type'] === 'CONVENIO' ? 'origin-convenio' : 'origin-manual'; ?>">
-                                    <?php echo $r['source_type'] === 'CONVENIO' ? 'Convenio' : 'Manual'; ?>
+                                <span class="td-origin <?php echo $isConvenio ? 'origin-convenio' : 'origin-manual'; ?>">
+                                    <?php echo $isConvenio ? 'Convenio' : 'Manual'; ?>
                                 </span>
                             </td>
-                            <td><?php echo htmlspecialchars((string) ($agreementMap[(int) ($r['agreement_id'] ?? 0)] ?? '—'), ENT_QUOTES, 'UTF-8'); ?></td>
+                            <td><?php echo htmlspecialchars((string) ($agreementMap[$agreementId] ?? '—'), ENT_QUOTES, 'UTF-8'); ?></td>
                             <td><?php echo statusBadge((string) $r['status']); ?></td>
-                            <td><span class="btn btn-muted btn-sm">En desarrollo</span></td>
+                            <td>
+                                <span class="btn btn-muted btn-sm">
+                                    <?php echo (int) ($r['activities_count'] ?? 0); ?> actividad<?php echo (int) ($r['activities_count'] ?? 0) !== 1 ? 'es' : ''; ?>
+                                </span>
+                            </td>
+                            <td class="actions-cell">
+                                <div class="action-stack">
+                                    <?php if ($isConvenio): ?>
+                                    <div class="action-box">
+                                        <h4>1) Generar informe con funciones del convenio</h4>
+                                        <p>Selecciona las funciones que aplican a este informe. Esta carga se ejecuta solo una vez por informe.</p>
+                                        <?php if ($hasActivities): ?>
+                                            <span class="btn btn-muted btn-sm">Funciones ya cargadas</span>
+                                        <?php elseif (count($functionsForAgreement) === 0): ?>
+                                            <span class="btn btn-muted btn-sm">Sin funciones en el convenio</span>
+                                        <?php else: ?>
+                                            <form method="post">
+                                                <input type="hidden" name="action" value="add_functions">
+                                                <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                                <div class="functions-list">
+                                                    <?php foreach ($functionsForAgreement as $fn): ?>
+                                                    <label class="fn-check">
+                                                        <input type="checkbox" name="function_items[]" value="<?php echo (int) $fn['id']; ?>">
+                                                        <span><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></span>
+                                                    </label>
+                                                    <?php endforeach; ?>
+                                                </div>
+                                                <button class="btn btn-sm" type="submit">Generar informe</button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </div>
+                                    <?php endif; ?>
+
+                                    <div class="action-box">
+                                        <h4>2) Agregar informe en PDF</h4>
+                                        <p>Adjunta el archivo PDF del informe final realizado fuera del sistema.</p>
+                                        <form method="post" enctype="multipart/form-data" class="upload-inline">
+                                            <input type="hidden" name="action" value="upload_pdf">
+                                            <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                            <input type="file" name="report_pdf" accept="application/pdf" required>
+                                            <button class="btn btn-sm" type="submit">Subir PDF</button>
+                                            <span class="btn btn-muted btn-sm"><?php echo (int) ($r['pdf_count'] ?? 0); ?> PDF</span>
+                                        </form>
+                                    </div>
+                                </div>
+                            </td>
                         </tr>
                         <?php endforeach; ?>
                         <?php if (count($reports) === 0): ?>
-                        <tr><td colspan="5" class="td-empty">
+                        <tr><td colspan="6" class="td-empty">
                             <svg width="32" height="32" style="display:block;margin:0 auto 10px;opacity:.35" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
                             No hay informes creados aún. Usa el formulario de arriba para crear el primero.
                         </td></tr>
@@ -677,7 +918,5 @@ function statusBadge(string $s): string
         agreementSelect.addEventListener('change', applyAgreementData);
         toggleSource();
     </script>
-</body>
-</html>
 </body>
 </html>
