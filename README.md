@@ -21,12 +21,12 @@ Esta primera etapa implementa:
 Ejemplo:
 
 ```env
-APP_NAME=Sistema Honorarios
-APP_URL=http://localhost/honorarios
+APP_NAME=Personal a Honorarios
+APP_URL=https://app.muniloslagos.cl/honorarios
 
 CU_CLIENT_ID=tu_client_id
 CU_CLIENT_SECRET=tu_client_secret
-CU_REDIRECT_URI=http://localhost/honorarios/callback.php
+CU_REDIRECT_URI=https://app.muniloslagos.cl/honorarios/callback.php
 
 CU_AUTH_URL=https://accounts.claveunica.gob.cl/openid/authorize/
 CU_TOKEN_URL=https://accounts.claveunica.gob.cl/openid/token/
@@ -39,13 +39,13 @@ HONORARIO_RUN_WHITELIST=12345678-9,11111111-1
 
 En el portal de integracion, la URI de retorno debe ser exactamente:
 
-- `http://localhost/honorarios/callback.php`
+- `https://app.muniloslagos.cl/honorarios/callback.php`
 
 Si usas otro dominio/puerto/ruta, actualiza tambien `APP_URL` y `CU_REDIRECT_URI`.
 
 ## 3) Probar login
 
-1. Abre `http://localhost/honorarios`
+1. Abre `https://app.muniloslagos.cl/honorarios/`
 2. Presiona "Ingresar con ClaveUnica"
 3. Autentica con ClaveUnica
 4. Si el RUN viene en la respuesta y esta en `HONORARIO_RUN_WHITELIST`, entra al dashboard
@@ -73,7 +73,17 @@ Si aparece "La solicitud fallo debido a que la URI de redireccion no es valida",
 2. Que `CU_REDIRECT_URI` sea exactamente la misma registrada en ClaveUnica.
 3. Que no haya diferencias en `http` vs `https`, `localhost` vs `127.0.0.1`, puerto o slash final.
 
-Puedes abrir `http://localhost/honorarios/diagnostico-claveunica.php` para ver la Redirect URI y la Authorization URL reales que envia el sistema.
+Puedes abrir `https://app.muniloslagos.cl/honorarios/diagnostico-claveunica.php` para ver la Redirect URI y la Authorization URL reales que envia el sistema.
+
+## 5.1) Despliegue en servidor
+
+El repositorio no versiona `.env`, por lo que en produccion debes crear ese archivo manualmente en la raiz del proyecto.
+
+Pasos:
+
+1. Copia `.env.example` a `.env` en el servidor.
+2. Completa `CU_CLIENT_ID`, `CU_CLIENT_SECRET` y `HONORARIO_RUN_WHITELIST`.
+3. Verifica que `APP_URL` y `CU_REDIRECT_URI` sigan apuntando a `https://app.muniloslagos.cl/honorarios`.
 
 ## 6) Como agregar usuarios que pueden ingresar
 

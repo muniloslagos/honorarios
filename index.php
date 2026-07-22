@@ -6,6 +6,8 @@ require_once __DIR__ . '/src/auth.php';
 if (isAuthenticated()) {
     redirectTo('dashboard.php');
 }
+
+$envExists = is_file(__DIR__ . '/.env');
 ?>
 <!doctype html>
 <html lang="es">
@@ -95,8 +97,8 @@ if (isAuthenticated()) {
 
         <a class="btn" href="login.php">Ingresar con ClaveUnica</a>
 
-        <?php if (!is_file(__DIR__ . '/.env')): ?>
-            <div class="warn">Aun no existe el archivo .env. Duplica .env.example como .env y completa tus credenciales.</div>
+        <?php if (!$envExists): ?>
+            <div class="warn">No existe .env en este despliegue. El sistema cargo .env.example como respaldo. Crea .env en el servidor para definir credenciales reales y RUN autorizados.</div>
         <?php endif; ?>
 
         <p class="foot">Si tu RUN no esta en la lista permitida del perfil Honorario, el acceso sera rechazado.</p>

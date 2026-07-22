@@ -5,7 +5,10 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-loadEnv(__DIR__ . '/../.env');
+$envPath = __DIR__ . '/../.env';
+$envExamplePath = __DIR__ . '/../.env.example';
+
+loadEnv(is_file($envPath) ? $envPath : $envExamplePath);
 
 function loadEnv(string $path): void
 {
@@ -57,7 +60,7 @@ function envValue(string $key, ?string $default = null): ?string
 
 function appUrl(string $path = ''): string
 {
-    $base = rtrim(envValue('APP_URL', 'http://localhost/honorarios') ?? 'http://localhost/honorarios', '/');
+    $base = rtrim(envValue('APP_URL', 'https://app.muniloslagos.cl/honorarios') ?? 'https://app.muniloslagos.cl/honorarios', '/');
     $path = ltrim($path, '/');
 
     return $path === '' ? $base : $base . '/' . $path;
