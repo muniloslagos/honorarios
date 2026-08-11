@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/src/auth.php';
 
 if (isAuthenticated()) {
-    redirectTo('dashboard.php');
+    redirectToRoleHome();
 }
 
 $envExists = is_file(__DIR__ . '/.env');

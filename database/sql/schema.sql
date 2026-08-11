@@ -15,9 +15,12 @@ USE appmuniloslagos_sgh;
 CREATE TABLE IF NOT EXISTS system_users (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   run VARCHAR(12) NOT NULL,
+  first_names VARCHAR(120) NULL,
+  last_names VARCHAR(120) NULL,
   full_name VARCHAR(180) NOT NULL,
   email VARCHAR(180) NULL,
-  role ENUM('ADMINISTRADOR', 'RRHH', 'FINANZAS', 'HONORARIO') NOT NULL,
+  phone VARCHAR(30) NULL,
+  role ENUM('ADMINISTRADOR', 'RRHH', 'FINANZAS', 'HONORARIO', 'DIRECTOR') NOT NULL,
   profession_experience VARCHAR(255) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -59,6 +62,8 @@ CREATE TABLE IF NOT EXISTS agreements (
   end_date DATE NOT NULL,
   installments_total INT UNSIGNED NULL,
   program_item VARCHAR(255) NOT NULL,
+  profession_experience VARCHAR(255) NULL,
+  supervision_unit VARCHAR(255) NULL,
   decree_id BIGINT UNSIGNED NULL,
   pdf_original_name VARCHAR(255) NULL,
   pdf_path VARCHAR(255) NULL,
@@ -102,6 +107,7 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
 
   provider_name VARCHAR(180) NOT NULL,
   profession_experience VARCHAR(255) NOT NULL,
+  supervision_unit VARCHAR(255) NULL,
 
   source_type ENUM('MANUAL', 'CONVENIO') NOT NULL DEFAULT 'CONVENIO',
   agreement_id BIGINT UNSIGNED NULL,
@@ -109,9 +115,13 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
   -- Campos manuales o autocompletados desde convenio
   program_activity_text VARCHAR(255) NOT NULL,
   decree_number_text VARCHAR(80) NULL,
+  decree_date DATE NULL,
   agreement_start_date DATE NULL,
   agreement_end_date DATE NULL,
   installment_number INT UNSIGNED NULL,
+  boleta_number VARCHAR(80) NULL,
+  boleta_date DATE NULL,
+  boleta_amount DECIMAL(14,2) NULL,
 
   -- Permite multiples informes manuales en mismo mes/anio,
   -- pero evita duplicar un informe para el mismo convenio y periodo.
@@ -119,7 +129,7 @@ CREATE TABLE IF NOT EXISTS monthly_reports (
     CASE WHEN source_type = 'CONVENIO' THEN agreement_id ELSE NULL END
   ) STORED,
 
-  status ENUM('BORRADOR', 'ENVIADO', 'OBSERVADO', 'APROBADO', 'RECHAZADO') NOT NULL DEFAULT 'BORRADOR',
+  status ENUM('BORRADOR', 'ENVIADO', 'OBSERVADO', 'APROBADO', 'RECHAZADO', 'APROBADO_PAGO') NOT NULL DEFAULT 'BORRADOR',
   observations TEXT NULL,
 
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -147,6 +157,7 @@ CREATE TABLE IF NOT EXISTS monthly_report_activities (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   report_id BIGINT UNSIGNED NOT NULL,
   activity_date DATE NULL,
+  function_title VARCHAR(255) NULL,
   activity_description TEXT NOT NULL,
   hours_worked DECIMAL(5,2) NULL,
   sort_order INT UNSIGNED NOT NULL DEFAULT 1,
@@ -161,7 +172,7 @@ CREATE TABLE IF NOT EXISTS monthly_report_activities (
 CREATE TABLE IF NOT EXISTS monthly_report_files (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   report_id BIGINT UNSIGNED NOT NULL,
-  file_type ENUM('RESPALDO', 'CONVENIO_FIRMADO', 'OTRO') NOT NULL,
+  file_type ENUM('RESPALDO', 'CONVENIO_FIRMADO', 'DECRETO', 'BOLETA', 'CERTIFICADO', 'HISTORICO', 'OTRO') NOT NULL,
   original_name VARCHAR(255) NOT NULL,
   stored_path VARCHAR(255) NOT NULL,
   mime_type VARCHAR(120) NULL,
@@ -174,7 +185,73 @@ CREATE TABLE IF NOT EXISTS monthly_report_files (
 ) ENGINE=InnoDB;
 
 -- -----------------------------------------------------
--- 5) Historial/Auditoria
+-- 5) Firmas del personal a honorarios
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS honorario_signatures (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  honorario_user_id BIGINT UNSIGNED NOT NULL,
+  original_name VARCHAR(255) NOT NULL,
+  stored_path VARCHAR(255) NOT NULL,
+  mime_type VARCHAR(80) NOT NULL,
+  size_bytes BIGINT UNSIGNED NULL,
+  uploaded_by_user_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_honorario_signatures_user (honorario_user_id),
+  CONSTRAINT fk_honorario_signatures_user
+    FOREIGN KEY (honorario_user_id) REFERENCES system_users(id)
+    ON DELETE CASCADE,
+  CONSTRAINT fk_honorario_signatures_uploader
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES system_users(id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB;
+-- -----------------------------------------------------
+-- 6) Solicitudes de firma remota
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS signature_requests (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  report_id BIGINT UNSIGNED NOT NULL,
+  report_file_id BIGINT UNSIGNED NOT NULL,
+  honorario_user_id BIGINT UNSIGNED NOT NULL,
+  recipient_email VARCHAR(180) NOT NULL,
+  token_hash CHAR(64) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  sent_at DATETIME NULL,
+  opened_at DATETIME NULL,
+  signed_at DATETIME NULL,
+  signed_signature_path VARCHAR(255) NULL,
+  signer_ip VARCHAR(45) NULL,
+  signer_user_agent VARCHAR(500) NULL,
+  status ENUM('PENDIENTE', 'FIRMADO', 'EXPIRADO', 'ANULADO') NOT NULL DEFAULT 'PENDIENTE',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_signature_requests_token (token_hash),
+  KEY idx_signature_requests_report (report_id),
+  KEY idx_signature_requests_user (honorario_user_id),
+  CONSTRAINT fk_signature_requests_report FOREIGN KEY (report_id) REFERENCES monthly_reports(id) ON DELETE CASCADE,
+  CONSTRAINT fk_signature_requests_file FOREIGN KEY (report_file_id) REFERENCES monthly_report_files(id) ON DELETE CASCADE,
+  CONSTRAINT fk_signature_requests_user FOREIGN KEY (honorario_user_id) REFERENCES system_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+-- -----------------------------------------------------
+-- 7) Configuración SMTP
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS smtp_settings (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  host VARCHAR(255) NOT NULL,
+  port SMALLINT UNSIGNED NOT NULL DEFAULT 587,
+  encryption ENUM('tls', 'ssl', 'none') NOT NULL DEFAULT 'tls',
+  username VARCHAR(255) NOT NULL,
+  password_encrypted TEXT NOT NULL,
+  from_email VARCHAR(180) NOT NULL,
+  from_name VARCHAR(180) NOT NULL,
+  reply_to_email VARCHAR(180) NULL,
+  is_enabled TINYINT(1) NOT NULL DEFAULT 0,
+  updated_by_user_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_smtp_settings_updated_by FOREIGN KEY (updated_by_user_id) REFERENCES system_users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+-- -----------------------------------------------------
+-- 8) Historial/Auditoria
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit_log (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -189,3 +266,5 @@ CREATE TABLE IF NOT EXISTS audit_log (
   CONSTRAINT fk_audit_actor_user
     FOREIGN KEY (actor_user_id) REFERENCES system_users(id)
 ) ENGINE=InnoDB;
+
+

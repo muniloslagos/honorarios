@@ -5,7 +5,7 @@ require_once __DIR__ . '/src/auth.php';
 require_once __DIR__ . '/src/claveunica.php';
 
 if (isAuthenticated()) {
-    redirectTo('dashboard.php');
+    redirectToRoleHome();
 }
 
 $error = '';
@@ -18,7 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $localUser = authenticateLocalUser($username, $password);
     if ($localUser !== null) {
         loginUser($localUser['user_info'], $localUser['role']);
-        redirectTo($localUser['role'] === ROLE_HONORARIO ? 'dashboard.php' : 'index.php');
+        redirectToRoleHome();
     }
 
     $error = 'Credenciales locales invalidas. Revisa el usuario y la clave de desarrollo.';

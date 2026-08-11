@@ -44,13 +44,25 @@ if (isset($userInfo['error'])) {
     exit;
 }
 
-$role = resolveRoleForUser($userInfo);
-if ($role !== ROLE_HONORARIO) {
+$run = extractRunFromUserInfo($userInfo);
+$role = null;
+if ($run !== null) {
+    try {
+        require_once __DIR__ . '/src/db.php';
+        $roleStmt = db()->prepare('SELECT role FROM system_users WHERE run = :run AND is_active = 1 ORDER BY id LIMIT 1');
+        $roleStmt->execute(['run' => $run]);
+        $storedRole = $roleStmt->fetchColumn();
+        if (is_string($storedRole) && $storedRole !== '') $role = $storedRole;
+    } catch (Throwable $e) {
+        $role = null;
+    }
+}
+$role = $role ?? resolveRoleForUser($userInfo);
+if (!in_array($role, [ROLE_HONORARIO, ROLE_DIRECTOR, ROLE_ADMIN, ROLE_RRHH, ROLE_FINANZAS], true)) {
     http_response_code(403);
-    $run = extractRunFromUserInfo($userInfo) ?? 'desconocido';
-    echo 'Acceso denegado. El RUN ' . htmlspecialchars($run, ENT_QUOTES, 'UTF-8') . ' no tiene perfil HONORARIO habilitado.';
+    echo 'Acceso denegado. El RUN ' . htmlspecialchars((string) ($run ?? 'desconocido'), ENT_QUOTES, 'UTF-8') . ' no tiene un perfil habilitado.';
     exit;
 }
 
-loginUser($userInfo, $role);
-redirectTo('dashboard.php');
+loginUser($userInfo, (string) $role);
+redirectToRoleHome();

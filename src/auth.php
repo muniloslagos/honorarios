@@ -40,6 +40,19 @@ function requireRole(string $role): array
     return $user;
 }
 
+function homePathForRole(string $role): string
+{
+    if ($role === ROLE_ADMIN) return 'admin.php';
+    if ($role === ROLE_DIRECTOR) return 'director.php';
+    if ($role === ROLE_FINANZAS) return 'finanzas.php';
+    return 'dashboard.php';
+}
+
+function redirectToRoleHome(?array $user = null): never
+{
+    $resolvedUser = $user ?? requireLogin();
+    redirectTo(homePathForRole((string) ($resolvedUser['role'] ?? '')));
+}
 function isLocalAuthEnabled(): bool
 {
     $flag = envValue('LOCAL_AUTH_ENABLED', 'false');
@@ -96,8 +109,24 @@ function authenticateLocalUser(string $username, string $password): ?array
         $profilePassword = (string) ($profile['password'] ?? '');
 
         if ($profileUsername === $normalizedUsername && $profilePassword === $normalizedPassword) {
+            $resolvedRole = $role;
+            try {
+                require_once __DIR__ . '/db.php';
+                $userStmt = db()->prepare('SELECT role, is_active FROM system_users WHERE run = :run ORDER BY (role = :configured_role) DESC, id ASC LIMIT 1');
+                $userStmt->execute(['run' => (string) ($profile['run'] ?? ''), 'configured_role' => $role]);
+                $storedUser = $userStmt->fetch();
+                if ($storedUser !== false) {
+                    if ((int) $storedUser['is_active'] !== 1) {
+                        return null;
+                    }
+                    $resolvedRole = (string) $storedUser['role'];
+                }
+            } catch (Throwable $e) {
+                // Permite el primer acceso local antes de inicializar la base de datos.
+            }
+
             return [
-                'role' => $role,
+                'role' => $resolvedRole,
                 'user_info' => [
                     'run' => (string) ($profile['run'] ?? ''),
                     'name' => (string) ($profile['name'] ?? 'Usuario Local'),
@@ -107,6 +136,18 @@ function authenticateLocalUser(string $username, string $password): ?array
                 ],
             ];
         }
+    }
+
+    try {
+        require_once __DIR__ . '/db.php';
+        $stmt = db()->prepare("SELECT u.run, u.full_name, u.profession_experience, dp.local_password_hash FROM director_profiles dp INNER JOIN system_users u ON u.id = dp.system_user_id WHERE dp.local_username = :username AND dp.is_active = 1 AND u.is_active = 1 AND u.role = 'DIRECTOR' LIMIT 1");
+        $stmt->execute(['username' => $normalizedUsername]);
+        $director = $stmt->fetch();
+        if ($director !== false && password_verify($normalizedPassword, (string) $director['local_password_hash'])) {
+            return ['role' => ROLE_DIRECTOR, 'user_info' => ['run' => (string) $director['run'], 'name' => (string) $director['full_name'], 'profesion' => (string) ($director['profession_experience'] ?? ''), 'local' => true, 'username' => $normalizedUsername]];
+        }
+    } catch (Throwable $e) {
+        // La migración de directores puede no estar instalada todavía.
     }
 
     return null;

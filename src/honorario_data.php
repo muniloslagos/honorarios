@@ -15,7 +15,7 @@ function ensureHonorarioDbUser(array $authUser): array
         throw new RuntimeException('No existe RUN en la sesion autenticada.');
     }
 
-    $find = $pdo->prepare('SELECT id, run, full_name, profession_experience FROM system_users WHERE run = :run AND role = :role LIMIT 1');
+    $find = $pdo->prepare('SELECT id, run, full_name, profession_experience, direction_id FROM system_users WHERE run = :run AND role = :role LIMIT 1');
     $find->execute(['run' => $run, 'role' => 'HONORARIO']);
     $row = $find->fetch();
 

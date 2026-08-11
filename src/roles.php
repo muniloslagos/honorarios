@@ -7,6 +7,7 @@ const ROLE_ADMIN = 'ADMINISTRADOR';
 const ROLE_RRHH = 'RRHH';
 const ROLE_FINANZAS = 'FINANZAS';
 const ROLE_HONORARIO = 'HONORARIO';
+const ROLE_DIRECTOR = 'DIRECTOR';
 
 function extractRunFromUserInfo(array $userInfo): ?string
 {

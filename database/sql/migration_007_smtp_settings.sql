@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS smtp_settings (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  host VARCHAR(255) NOT NULL,
+  port SMALLINT UNSIGNED NOT NULL DEFAULT 587,
+  encryption ENUM('tls', 'ssl', 'none') NOT NULL DEFAULT 'tls',
+  username VARCHAR(255) NOT NULL,
+  password_encrypted TEXT NOT NULL,
+  from_email VARCHAR(180) NOT NULL,
+  from_name VARCHAR(180) NOT NULL,
+  reply_to_email VARCHAR(180) NULL,
+  is_enabled TINYINT(1) NOT NULL DEFAULT 0,
+  updated_by_user_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_smtp_settings_updated_by FOREIGN KEY (updated_by_user_id) REFERENCES system_users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;

@@ -3,19 +3,299 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/src/auth.php';
 require_once __DIR__ . '/src/honorario_data.php';
+require_once __DIR__ . '/src/mailer.php';
+require_once __DIR__ . '/src/convenio_report_pdf.php';
 
 $authUser = requireRole(ROLE_HONORARIO);
 $dbUser = ensureHonorarioDbUser($authUser);
 $pdo = db();
 
+$configuredDirectionName = '';
+$configuredDirectionId = (int) ($dbUser['direction_id'] ?? 0);
+if ($configuredDirectionId > 0) {
+    $directionStmt = $pdo->prepare('SELECT name FROM directions WHERE id = :id AND is_active = 1 LIMIT 1');
+    $directionStmt->execute(['id' => $configuredDirectionId]);
+    $configuredDirectionName = trim((string) ($directionStmt->fetchColumn() ?: ''));
+}
+
 $success = '';
 $error = '';
+$showCreateForm = false;
+$selectedCreateSource = 'CONVENIO';
+$selectedReportId = (int) ($_GET['report_id'] ?? 0);
 
-$agreementsStmt = $pdo->prepare('SELECT a.id, a.agreement_number, a.start_date, a.end_date, a.program_item, a.installments_total, d.decree_number
+function pdfEscape(string $text): string
+{
+    $text = str_replace("\r", ' ', $text);
+    $text = str_replace("\n", ' ', $text);
+    $text = preg_replace('/\s+/', ' ', $text) ?? $text;
+    $text = trim($text);
+    if (function_exists('iconv')) {
+        $text = iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $text) ?: $text;
+    }
+    $text = str_replace('\\', '\\\\', $text);
+    $text = str_replace('(', '\\(', $text);
+    $text = str_replace(')', '\\)', $text);
+    return $text;
+}
+
+function buildSimplePdf(array $lines): string
+{
+    $content = "BT\n/F1 11 Tf\n50 800 Td\n14 TL\n";
+    foreach ($lines as $line) {
+        $content .= '(' . pdfEscape($line) . ") Tj\nT*\n";
+    }
+    $content .= "ET\n";
+
+    $objects = [];
+    $objects[] = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    $objects[] = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+    $objects[] = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n";
+    $objects[] = "4 0 obj\n<< /Length " . strlen($content) . " >>\nstream\n" . $content . "endstream\nendobj\n";
+    $objects[] = "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    $pdf = "%PDF-1.4\n";
+    $offsets = [0];
+    foreach ($objects as $obj) {
+        $offsets[] = strlen($pdf);
+        $pdf .= $obj;
+    }
+
+    $xrefOffset = strlen($pdf);
+    $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
+    $pdf .= "0000000000 65535 f \n";
+    for ($i = 1; $i <= count($objects); $i++) {
+        $pdf .= str_pad((string) $offsets[$i], 10, '0', STR_PAD_LEFT) . " 00000 n \n";
+    }
+    $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\n";
+    $pdf .= "startxref\n" . $xrefOffset . "\n%%EOF";
+
+    return $pdf;
+}
+
+function prepareConvenioReportPdf(PDO $pdo, int $reportId, int $honorarioUserId): array
+{
+    $reportStmt = $pdo->prepare("SELECT * FROM monthly_reports
+                                 WHERE id = :id
+                                   AND honorario_user_id = :uid
+                                   AND source_type = 'CONVENIO'
+                                   AND status IN ('BORRADOR', 'RECHAZADO')
+                                 LIMIT 1");
+    $reportStmt->execute(['id' => $reportId, 'uid' => $honorarioUserId]);
+    $report = $reportStmt->fetch();
+    if ($report === false) {
+        throw new RuntimeException('El informe no está disponible para preparar y firmar.');
+    }
+
+    $activityStmt = $pdo->prepare('SELECT COALESCE(NULLIF(a.function_title, \'\'), af.function_text) AS function_title,
+                                          a.activity_description
+                                   FROM monthly_report_activities a
+                                   INNER JOIN monthly_reports r ON r.id = a.report_id
+                                   LEFT JOIN agreement_functions af
+                                     ON af.agreement_id = r.agreement_id
+                                    AND af.sort_order = a.sort_order
+                                   WHERE a.report_id = :id
+                                   ORDER BY a.sort_order, a.id');
+    $activityStmt->execute(['id' => $reportId]);
+    $activities = $activityStmt->fetchAll();
+    if (!$activities) {
+        throw new RuntimeException('Guarda las actividades antes de firmar el informe.');
+    }
+
+    $pdf = buildConvenioReportPdf($report, $activities);
+    $dir = __DIR__ . '/uploads/reports/generated';
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+        throw new RuntimeException('No fue posible crear la carpeta de informes.');
+    }
+    $name = 'informe_' . $reportId . '_' . date('YmdHis') . '.pdf';
+    $fullPath = $dir . '/' . $name;
+    if (file_put_contents($fullPath, $pdf, LOCK_EX) === false) {
+        throw new RuntimeException('No fue posible preparar el PDF.');
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare("DELETE FROM monthly_report_files WHERE report_id = :id AND file_type = 'RESPALDO'")->execute(['id' => $reportId]);
+        $insertFile = $pdo->prepare("INSERT INTO monthly_report_files (report_id, file_type, original_name, stored_path, mime_type, size_bytes)
+                                     VALUES (:id, 'RESPALDO', :name, :path, 'application/pdf', :size)");
+        $insertFile->execute([
+            'id' => $reportId,
+            'name' => $name,
+            'path' => 'uploads/reports/generated/' . $name,
+            'size' => strlen($pdf),
+        ]);
+        $fileId = (int) $pdo->lastInsertId();
+        $pdo->prepare("UPDATE monthly_reports
+                       SET status = 'BORRADOR', director_rejection_observation = NULL, observations = NULL
+                       WHERE id = :id")->execute(['id' => $reportId]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        if (is_file($fullPath)) unlink($fullPath);
+        throw $e;
+    }
+
+    return ['file_id' => $fileId, 'name' => $name];
+}
+if ((string) ($_GET['action'] ?? '') === 'preview_pdf' && $selectedReportId > 0) {
+    $reportPreviewStmt = $pdo->prepare('SELECT report_month, report_year, provider_name, profession_experience, supervision_unit, source_type, program_activity_text, decree_number_text, agreement_start_date, agreement_end_date, installment_number, boleta_number, boleta_date, boleta_amount
+                                        FROM monthly_reports
+                                        WHERE id = :id AND honorario_user_id = :uid
+                                        LIMIT 1');
+    $reportPreviewStmt->execute(['id' => $selectedReportId, 'uid' => $dbUser['id']]);
+    $previewReport = $reportPreviewStmt->fetch();
+
+    if ($previewReport === false) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo 'Informe no encontrado.';
+        exit;
+    }
+
+    $activityPreviewStmt = $pdo->prepare('SELECT COALESCE(NULLIF(a.function_title, \'\'), af.function_text) AS function_title,
+                                                a.activity_description
+                                         FROM monthly_report_activities a
+                                         INNER JOIN monthly_reports r ON r.id = a.report_id
+                                         LEFT JOIN agreement_functions af
+                                           ON af.agreement_id = r.agreement_id
+                                          AND af.sort_order = a.sort_order
+                                         WHERE a.report_id = :id
+                                         ORDER BY a.sort_order ASC, a.id ASC');
+    $activityPreviewStmt->execute(['id' => $selectedReportId]);
+    $activityRows = $activityPreviewStmt->fetchAll();
+
+    $previewMonthNames = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    $monthValue = (int) ($previewReport['report_month'] ?? 0);
+    $periodLabel = ($previewMonthNames[$monthValue] ?? (string) $monthValue) . ' ' . (string) ($previewReport['report_year'] ?? '');
+
+    $lines = [
+        'Vista previa de informe mensual',
+        'Periodo: ' . $periodLabel,
+        'Prestador: ' . (string) ($previewReport['provider_name'] ?? ''),
+        'Profesion/Oficio: ' . (string) ($previewReport['profession_experience'] ?? ''),
+        'Direccion/Unidad: ' . (string) ($previewReport['supervision_unit'] ?? ''),
+        'Origen: ' . ((string) ($previewReport['source_type'] ?? '') === 'CONVENIO' ? 'Convenio' : 'Manual'),
+        'Programa/Actividad: ' . (string) ($previewReport['program_activity_text'] ?? ''),
+        'Decreto: ' . (string) ($previewReport['decree_number_text'] ?? ''),
+        'Vigencia: ' . (string) ($previewReport['agreement_start_date'] ?? '') . ' a ' . (string) ($previewReport['agreement_end_date'] ?? ''),
+        'Cuota: ' . (string) ($previewReport['installment_number'] ?? ''),
+        'Boleta: ' . (string) ($previewReport['boleta_number'] ?? '') . ' (' . (string) ($previewReport['boleta_date'] ?? '') . ')',
+        ' ',
+        'Actividades:'
+    ];
+
+    if (count($activityRows) === 0) {
+        $lines[] = '- Sin actividades registradas.';
+    } else {
+        $idx = 1;
+        foreach ($activityRows as $row) {
+            $functionTitle = trim((string) ($row['function_title'] ?? ''));
+            $activityText = (string) ($row['activity_description'] ?? '');
+            if ($functionTitle !== '') {
+                $lines[] = $idx . '. Funcion: ' . $functionTitle;
+                $lines[] = '   Actividad: ' . $activityText;
+            } else {
+                $lines[] = $idx . '. ' . $activityText;
+            }
+            $idx++;
+        }
+    }
+
+    $pdfContent = (string) ($previewReport['source_type'] ?? '') === 'CONVENIO'
+        ? buildConvenioReportPdf($previewReport, $activityRows)
+        : buildSimplePdf($lines);
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: inline; filename="vista_previa_informe_' . $selectedReportId . '.pdf"');
+    header('Content-Length: ' . strlen($pdfContent));
+    echo $pdfContent;
+    exit;
+}
+
+if ((string) ($_GET['action'] ?? '') === 'view_uploaded_pdf') {
+    $fileId = (int) ($_GET['file_id'] ?? 0);
+    $fileStmt = $pdo->prepare('SELECT f.original_name, f.stored_path
+                               FROM monthly_report_files f
+                               INNER JOIN monthly_reports r ON r.id = f.report_id
+                               WHERE f.id = :id
+                                 AND f.file_type = \'RESPALDO\'
+                                 AND r.honorario_user_id = :uid
+                               LIMIT 1');
+    $fileStmt->execute(['id' => $fileId, 'uid' => $dbUser['id']]);
+    $uploadedPdf = $fileStmt->fetch();
+
+    $storedPath = $uploadedPdf !== false ? (string) $uploadedPdf['stored_path'] : '';
+    $absolutePath = $storedPath !== ''
+        ? __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $storedPath)
+        : '';
+    $uploadsRoot = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+    $resolvedPath = $absolutePath !== '' ? realpath($absolutePath) : false;
+
+    if (
+        $uploadedPdf === false
+        || $uploadsRoot === false
+        || $resolvedPath === false
+        || !str_starts_with($resolvedPath, $uploadsRoot . DIRECTORY_SEPARATOR)
+        || !is_file($resolvedPath)
+    ) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo 'PDF no encontrado.';
+        exit;
+    }
+
+    $downloadName = preg_replace('/[^A-Za-z0-9._-]/', '_', (string) $uploadedPdf['original_name']) ?: 'informe.pdf';
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: inline; filename="' . $downloadName . '"');
+    header('Content-Length: ' . (string) filesize($resolvedPath));
+    header('X-Content-Type-Options: nosniff');
+    readfile($resolvedPath);
+    exit;
+}
+if ((string) ($_GET['action'] ?? '') === 'view_document_pdf' && $selectedReportId > 0) {
+    $documentType = strtoupper((string) ($_GET['type'] ?? ''));
+    if (!in_array($documentType, ['REPORT', 'CERTIFICATE', 'BOLETA', 'DECREE', 'AGREEMENT'], true)) {
+        http_response_code(400); exit('Tipo de documento no válido.');
+    }
+    $documentStmt = $pdo->prepare("SELECT r.id,r.status,r.agreement_id,a.pdf_path AS agreement_path,d.pdf_path AS decree_path,
+        (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='RESPALDO' ORDER BY f.id DESC LIMIT 1) AS report_path,
+        (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='CERTIFICADO' ORDER BY f.id DESC LIMIT 1) AS certificate_path,
+        (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='BOLETA' ORDER BY f.id DESC LIMIT 1) AS boleta_path,
+        (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='CONVENIO_FIRMADO' ORDER BY f.id DESC LIMIT 1) AS manual_agreement_path,
+        (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='DECRETO' ORDER BY f.id DESC LIMIT 1) AS manual_decree_path
+        FROM monthly_reports r LEFT JOIN agreements a ON a.id=r.agreement_id LEFT JOIN decrees d ON d.id=a.decree_id
+        WHERE r.id=:id AND r.honorario_user_id=:uid AND r.status IN ('APROBADO','APROBADO_PAGO') LIMIT 1");
+    $documentStmt->execute(['id'=>$selectedReportId,'uid'=>$dbUser['id']]);
+    $document = $documentStmt->fetch();
+    $pathKey = ['REPORT'=>'report_path','CERTIFICATE'=>'certificate_path','BOLETA'=>'boleta_path'][$documentType] ?? '';
+    $storedPath = '';
+    if ($document !== false) {
+        if ($documentType === 'AGREEMENT') $storedPath = (string) ($document['agreement_path'] ?: $document['manual_agreement_path']);
+        elseif ($documentType === 'DECREE') $storedPath = (string) ($document['decree_path'] ?: $document['manual_decree_path']);
+        else $storedPath = (string) ($document[$pathKey] ?? '');
+    }
+    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    $resolved = $storedPath !== '' ? realpath(__DIR__ . '/' . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $storedPath)) : false;
+    if ($document === false || $uploadsRoot === false || $resolved === false || !str_starts_with($resolved, $uploadsRoot . DIRECTORY_SEPARATOR) || !is_file($resolved)) {
+        http_response_code(404); header('Content-Type: text/plain; charset=UTF-8'); echo 'Documento no disponible.'; exit;
+    }
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: inline; filename="' . strtolower($documentType) . '_' . $selectedReportId . '.pdf"');
+    header('Content-Length: ' . filesize($resolved));
+    header('X-Content-Type-Options: nosniff');
+    readfile($resolved); exit;
+}
+$agreementsStmt = $pdo->prepare("SELECT a.id, a.agreement_number, a.start_date, a.end_date, a.program_item, a.installments_total,
+                                        a.profession_experience, a.supervision_unit, d.decree_number,
+                                        (SELECT COALESCE(MAX(r.installment_number), 0) + 1
+                                         FROM monthly_reports r
+                                         WHERE r.agreement_id = a.id
+                                           AND r.honorario_user_id = a.honorario_user_id
+                                           AND r.status = 'APROBADO'
+                                           AND r.installment_number IS NOT NULL) AS next_installment
                                  FROM agreements a
                                  LEFT JOIN decrees d ON d.id = a.decree_id
                                  WHERE a.honorario_user_id = :uid
-                                 ORDER BY a.start_date DESC');
+                                 ORDER BY a.start_date DESC");
 $agreementsStmt->execute(['uid' => $dbUser['id']]);
 $agreements = $agreementsStmt->fetchAll();
 
@@ -28,27 +308,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $year = (int) ($_POST['report_year'] ?? 0);
             $provider = trim((string) ($_POST['provider_name'] ?? ''));
             $profession = trim((string) ($_POST['profession_experience'] ?? ''));
+            $supervisionUnit = $configuredDirectionName;
+            $saveProfileRecords = isset($_POST['save_profile_records']);
 
             $sourceType = (string) ($_POST['source_type'] ?? 'CONVENIO');
             if ($sourceType !== 'MANUAL' && $sourceType !== 'CONVENIO') {
                 $sourceType = 'CONVENIO';
             }
+            $selectedCreateSource = $sourceType;
 
             $agreementIdRaw = trim((string) ($_POST['agreement_id'] ?? ''));
             $agreementId = $agreementIdRaw !== '' ? (int) $agreementIdRaw : null;
 
             $programText = trim((string) ($_POST['program_activity_text'] ?? ''));
             $decreeText = trim((string) ($_POST['decree_number_text'] ?? ''));
+            $decreeDate = trim((string) ($_POST['decree_date_manual'] ?? ''));
             $startDate = trim((string) ($_POST['agreement_start_date'] ?? ''));
             $endDate = trim((string) ($_POST['agreement_end_date'] ?? ''));
             $installmentRaw = trim((string) ($_POST['installment_number'] ?? ''));
             $installment = $installmentRaw !== '' ? (int) $installmentRaw : null;
+            $installmentsTotalRaw = trim((string) ($_POST['installments_total_manual'] ?? ''));
+            $installmentsTotalManual = $installmentsTotalRaw !== '' ? (int) $installmentsTotalRaw : null;
+            $agreementNumberManual = trim((string) ($_POST['agreement_number_manual'] ?? ''));
+            $agreementDateManual = trim((string) ($_POST['agreement_date_manual'] ?? ''));
+            $boletaNumber = trim((string) ($_POST['boleta_number'] ?? ''));
+            $boletaDate = trim((string) ($_POST['boleta_date'] ?? ''));
+            $boletaAmountRaw = str_replace(['.', ','], ['', '.'], trim((string) ($_POST['boleta_amount'] ?? '')));
+            $boletaAmount = $boletaAmountRaw !== '' && is_numeric($boletaAmountRaw) ? (float) $boletaAmountRaw : null;
 
             if ($month < 1 || $month > 12 || $year < 2020) {
                 throw new RuntimeException('Mes o anio invalido.');
             }
             if ($provider === '' || $profession === '') {
                 throw new RuntimeException('Nombre prestador y profesion/oficio son obligatorios.');
+            }
+            if ($supervisionUnit === '') {
+                throw new RuntimeException('El administrador debe asignarte una dirección antes de crear el informe.');
+            }
+            if ($sourceType === 'MANUAL' && $saveProfileRecords) {
+                if ($agreementNumberManual === '' || $agreementDateManual === '' || $decreeText === '' || $decreeDate === '') {
+                    throw new RuntimeException('Para guardar convenio y decreto en el perfil debes completar numero y fecha de convenio, y numero y fecha de decreto.');
+                }
+                if ($installmentsTotalManual === null || $installmentsTotalManual < 1) {
+                    throw new RuntimeException('Para guardar el convenio en el perfil debes informar el total de cuotas.');
+                }
             }
             if ($programText === '') {
                 throw new RuntimeException('Debes informar programa, convenio y/o actividad.');
@@ -57,9 +360,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new RuntimeException('Debes ingresar vigencia inicio y fin.');
             }
 
+            $agreementRow = null;
+
             if ($sourceType === 'CONVENIO') {
                 if ($agreementId === null) {
                     throw new RuntimeException('Debes seleccionar convenio para este tipo de informe.');
+                }
+
+                $agreementFetch = $pdo->prepare('SELECT a.id, a.agreement_number, a.start_date, a.end_date, a.installments_total, a.program_item, a.profession_experience, a.supervision_unit, d.decree_number, d.decree_date
+                                                 FROM agreements a
+                                                 LEFT JOIN decrees d ON d.id = a.decree_id
+                                                 WHERE a.id = :id AND a.honorario_user_id = :uid LIMIT 1');
+                $agreementFetch->execute(['id' => $agreementId, 'uid' => $dbUser['id']]);
+                $agreementRow = $agreementFetch->fetch();
+
+                if ($agreementRow === false) {
+                    throw new RuntimeException('No se encontro el convenio seleccionado.');
+                }
+
+                $profession = trim((string) ($agreementRow['profession_experience'] ?? $profession));
+                $supervisionUnit = $configuredDirectionName;
+                $programText = trim((string) ($agreementRow['program_item'] ?? $programText));
+                $decreeText = trim((string) ($agreementRow['decree_number'] ?? $decreeText));
+                $decreeDate = trim((string) ($agreementRow['decree_date'] ?? $decreeDate));
+                $startDate = trim((string) ($agreementRow['start_date'] ?? $startDate));
+                $endDate = trim((string) ($agreementRow['end_date'] ?? $endDate));
+
+                $maxInstallments = isset($agreementRow['installments_total']) ? (int) $agreementRow['installments_total'] : null;
+                if ($maxInstallments !== null && $maxInstallments > 0) {
+                    if ($installment === null || $installment < 1 || $installment > $maxInstallments) {
+                        throw new RuntimeException('Debes seleccionar una cuota valida para el convenio.');
+                    }
                 }
 
                 $check = $pdo->prepare('SELECT id FROM monthly_reports WHERE honorario_user_id = :uid AND report_month = :m AND report_year = :y AND source_type = :st AND agreement_id = :aid LIMIT 1');
@@ -81,13 +412,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 report_year,
                 provider_name,
                 profession_experience,
+                supervision_unit,
+                direction_id,
                 source_type,
                 agreement_id,
                 program_activity_text,
                 decree_number_text,
+                decree_date,
                 agreement_start_date,
                 agreement_end_date,
                 installment_number,
+                boleta_number,
+                boleta_date,
+                boleta_amount,
                 status
             ) VALUES (
                 :uid,
@@ -95,87 +432,707 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 :y,
                 :provider,
                 :profession,
+                :supervision_unit,
+                :direction_id,
                 :source_type,
                 :agreement_id,
                 :program_text,
                 :decree_text,
+                :decree_date,
                 :start_date,
                 :end_date,
                 :installment,
+                :boleta_number,
+                :boleta_date,
+                :boleta_amount,
                 :status
             )');
 
-            $insert->execute([
+            $pdo->beginTransaction();
+            try {
+                $insert->execute([
                 'uid' => $dbUser['id'],
                 'm' => $month,
                 'y' => $year,
                 'provider' => $provider,
                 'profession' => $profession,
+                'supervision_unit' => $supervisionUnit !== '' ? $supervisionUnit : null,
+                'direction_id' => isset($dbUser['direction_id']) ? (int) $dbUser['direction_id'] : null,
                 'source_type' => $sourceType,
                 'agreement_id' => $sourceType === 'CONVENIO' ? $agreementId : null,
                 'program_text' => $programText,
                 'decree_text' => $decreeText !== '' ? $decreeText : null,
+                'decree_date' => $decreeDate !== '' ? $decreeDate : null,
                 'start_date' => $startDate,
                 'end_date' => $endDate,
                 'installment' => $installment,
+                'boleta_number' => $boletaNumber !== '' ? $boletaNumber : null,
+                'boleta_date' => $boletaDate !== '' ? $boletaDate : null,
+                'boleta_amount' => $boletaAmount,
                 'status' => 'BORRADOR',
-            ]);
+                ]);
 
-            $success = 'Informe creado en estado BORRADOR. La carga de actividades queda en desarrollo.';
-        } elseif ($action === 'add_functions') {
-            $reportId = (int) ($_POST['report_id'] ?? 0);
-            $selectedFunctions = $_POST['function_items'] ?? [];
+                $selectedReportId = (int) $pdo->lastInsertId();
 
-            if (!is_array($selectedFunctions) || count($selectedFunctions) === 0) {
-                throw new RuntimeException('Debes seleccionar al menos una funcion del convenio.');
+                if ($sourceType === 'MANUAL') {
+                    $reportPdf = uploadPdf($_FILES['report_pdf_manual'] ?? [], 'reports');
+                    if ($reportPdf === null) {
+                        throw new RuntimeException('Debes cargar el PDF del informe para la modalidad manual.');
+                    }
+
+                    $agreementPdf = uploadPdf($_FILES['agreement_pdf_manual'] ?? [], 'agreements/' . $dbUser['run']);
+                    $decreePdf = uploadPdf($_FILES['decree_pdf_manual'] ?? [], 'decrees/' . $dbUser['run']);
+                    $boletaPdf = uploadPdf($_FILES['boleta_pdf_manual'] ?? [], 'reports');
+
+                    if ($saveProfileRecords && $agreementPdf === null) {
+                        throw new RuntimeException('Debes cargar el PDF del convenio si deseas guardarlo en el perfil.');
+                    }
+                    if ($saveProfileRecords && $decreePdf === null) {
+                        throw new RuntimeException('Debes cargar el PDF del decreto si deseas guardarlo en el perfil.');
+                    }
+
+                    $sizeBytes = isset($_FILES['report_pdf_manual']['size']) ? (int) $_FILES['report_pdf_manual']['size'] : null;
+                    $mimeType = isset($_FILES['report_pdf_manual']['type']) ? (string) $_FILES['report_pdf_manual']['type'] : null;
+                    $insertFile = $pdo->prepare('INSERT INTO monthly_report_files (report_id, file_type, original_name, stored_path, mime_type, size_bytes) VALUES (:rid, :type, :oname, :spath, :mime, :size)');
+                    $insertFile->execute([
+                        'rid' => $selectedReportId,
+                        'type' => 'RESPALDO',
+                        'oname' => (string) $reportPdf['original_name'],
+                        'spath' => (string) $reportPdf['stored_path'],
+                        'mime' => $mimeType,
+                        'size' => $sizeBytes,
+                    ]);
+
+                    if ($agreementPdf !== null) {
+                        $sizeBytes = isset($_FILES['agreement_pdf_manual']['size']) ? (int) $_FILES['agreement_pdf_manual']['size'] : null;
+                        $mimeType = isset($_FILES['agreement_pdf_manual']['type']) ? (string) $_FILES['agreement_pdf_manual']['type'] : null;
+                        $insertFile->execute([
+                            'rid' => $selectedReportId,
+                            'type' => 'CONVENIO_FIRMADO',
+                            'oname' => (string) $agreementPdf['original_name'],
+                            'spath' => (string) $agreementPdf['stored_path'],
+                            'mime' => $mimeType,
+                            'size' => $sizeBytes,
+                        ]);
+                    }
+
+                    if ($decreePdf !== null) {
+                        $sizeBytes = isset($_FILES['decree_pdf_manual']['size']) ? (int) $_FILES['decree_pdf_manual']['size'] : null;
+                        $mimeType = isset($_FILES['decree_pdf_manual']['type']) ? (string) $_FILES['decree_pdf_manual']['type'] : null;
+                        $insertFile->execute([
+                            'rid' => $selectedReportId,
+                            'type' => 'DECRETO',
+                            'oname' => (string) $decreePdf['original_name'],
+                            'spath' => (string) $decreePdf['stored_path'],
+                            'mime' => $mimeType,
+                            'size' => $sizeBytes,
+                        ]);
+                    }
+
+                    if ($boletaPdf !== null) {
+                        $sizeBytes = isset($_FILES['boleta_pdf_manual']['size']) ? (int) $_FILES['boleta_pdf_manual']['size'] : null;
+                        $mimeType = isset($_FILES['boleta_pdf_manual']['type']) ? (string) $_FILES['boleta_pdf_manual']['type'] : null;
+                        $insertFile->execute([
+                            'rid' => $selectedReportId,
+                            'type' => 'BOLETA',
+                            'oname' => (string) $boletaPdf['original_name'],
+                            'spath' => (string) $boletaPdf['stored_path'],
+                            'mime' => $mimeType,
+                            'size' => $sizeBytes,
+                        ]);
+                    }
+
+                    if ($saveProfileRecords) {
+                        $decreeInsert = $pdo->prepare('INSERT INTO decrees (honorario_user_id, decree_number, decree_date, pdf_original_name, pdf_path, created_by_user_id)
+                                                       VALUES (:uid,:num,:dt,:pdfn,:pdfp,:actor)
+                                                       ON DUPLICATE KEY UPDATE decree_date=VALUES(decree_date), pdf_original_name=VALUES(pdf_original_name), pdf_path=VALUES(pdf_path)');
+                        $decreeInsert->execute([
+                            'uid' => $dbUser['id'],
+                            'num' => $decreeText,
+                            'dt' => $decreeDate,
+                            'pdfn' => (string) $decreePdf['original_name'],
+                            'pdfp' => (string) $decreePdf['stored_path'],
+                            'actor' => $dbUser['id'],
+                        ]);
+
+                        $decreeFind = $pdo->prepare('SELECT id FROM decrees WHERE honorario_user_id = :uid AND decree_number = :num LIMIT 1');
+                        $decreeFind->execute(['uid' => $dbUser['id'], 'num' => $decreeText]);
+                        $decreeRow = $decreeFind->fetch();
+                        if ($decreeRow === false) {
+                            throw new RuntimeException('No fue posible registrar el decreto en el perfil.');
+                        }
+
+                        $agreementInsert = $pdo->prepare('INSERT INTO agreements (
+                            honorario_user_id, agreement_number, agreement_date, start_date, end_date, installments_total,
+                            program_item, profession_experience, supervision_unit, decree_id, pdf_original_name, pdf_path, status, created_by_user_id
+                        ) VALUES (
+                            :uid, :num, :ad, :sd, :ed, :ins, :prog, :profession, :supervision, :decree, :pdfn, :pdfp, :st, :actor
+                        )
+                        ON DUPLICATE KEY UPDATE
+                            agreement_date=VALUES(agreement_date),
+                            start_date=VALUES(start_date),
+                            end_date=VALUES(end_date),
+                            installments_total=VALUES(installments_total),
+                            program_item=VALUES(program_item),
+                            profession_experience=VALUES(profession_experience),
+                            supervision_unit=VALUES(supervision_unit),
+                            decree_id=VALUES(decree_id),
+                            pdf_original_name=VALUES(pdf_original_name),
+                            pdf_path=VALUES(pdf_path),
+                            status=VALUES(status)');
+                        $agreementInsert->execute([
+                            'uid' => $dbUser['id'],
+                            'num' => $agreementNumberManual,
+                            'ad' => $agreementDateManual,
+                            'sd' => $startDate,
+                            'ed' => $endDate,
+                            'ins' => $installmentsTotalManual,
+                            'prog' => $programText,
+                            'profession' => $profession,
+                            'supervision' => $supervisionUnit,
+                            'decree' => (int) $decreeRow['id'],
+                            'pdfn' => (string) $agreementPdf['original_name'],
+                            'pdfp' => (string) $agreementPdf['stored_path'],
+                            'st' => 'VIGENTE',
+                            'actor' => $dbUser['id'],
+                        ]);
+                    }
+                }
+
+                $pdo->commit();
+            } catch (Throwable $txe) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $txe;
             }
 
-            $reportStmt = $pdo->prepare('SELECT id, source_type, agreement_id FROM monthly_reports WHERE id = :id AND honorario_user_id = :uid LIMIT 1');
+            if ($sourceType === 'CONVENIO') {
+                redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '#reportActivitiesCard');
+            }
+            $success = 'Informe manual creado correctamente.';
+        } elseif ($action === 'save_activities') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+
+            $reportStmt = $pdo->prepare('SELECT r.id, r.source_type, r.status, r.agreement_id, r.report_month, r.report_year,
+                                                r.provider_name, r.profession_experience, r.supervision_unit, r.program_activity_text,
+                                                r.decree_number_text, r.agreement_start_date, r.agreement_end_date, r.installment_number,
+                                                r.boleta_number, r.boleta_date, r.director_signed_at,
+                                                EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_id = r.id AND sr.status = \'PENDIENTE\') AS has_pending_signature,
+                                                EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_id = r.id AND sr.status = \'FIRMADO\') AS has_employee_signature
+                                         FROM monthly_reports r
+                                         WHERE r.id = :id AND r.honorario_user_id = :uid
+                                         LIMIT 1');
             $reportStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
             $reportRow = $reportStmt->fetch();
 
             if ($reportRow === false) {
                 throw new RuntimeException('Informe no encontrado.');
             }
-            if ((string) $reportRow['source_type'] !== 'CONVENIO' || (int) ($reportRow['agreement_id'] ?? 0) <= 0) {
-                throw new RuntimeException('Solo los informes de origen CONVENIO pueden cargar funciones.');
+            if ((string) ($reportRow['status'] ?? '') === 'APROBADO' || trim((string) ($reportRow['director_signed_at'] ?? '')) !== '') {
+                throw new RuntimeException('El proceso de firmas está finalizado y las actividades ya no se pueden modificar.');
+            }
+            if (
+                (string) ($reportRow['status'] ?? '') !== 'RECHAZADO'
+                && (
+                    (string) ($reportRow['status'] ?? '') === 'ENVIADO'
+                    || (int) ($reportRow['has_pending_signature'] ?? 0) === 1
+                    || (int) ($reportRow['has_employee_signature'] ?? 0) === 1
+                )
+            ) {
+                throw new RuntimeException('El informe está en proceso de firma y sus actividades no se pueden modificar.');
+            }
+            $sourceType = (string) $reportRow['source_type'];
+            $agreementId = (int) ($reportRow['agreement_id'] ?? 0);
+
+            $finalProfession = trim((string) ($_POST['profession_experience'] ?? ''));
+            $finalSupervision = $configuredDirectionName;
+            $finalProgram = trim((string) ($_POST['program_activity_text'] ?? ''));
+            $finalDecree = trim((string) ($_POST['decree_number_text'] ?? ''));
+            $finalStart = trim((string) ($_POST['agreement_start_date'] ?? ''));
+            $finalEnd = trim((string) ($_POST['agreement_end_date'] ?? ''));
+            $finalInstallmentRaw = trim((string) ($_POST['installment_number'] ?? ''));
+            $finalInstallment = $finalInstallmentRaw !== '' ? (int) $finalInstallmentRaw : null;
+            $finalBoletaNumber = trim((string) ($_POST['boleta_number'] ?? ''));
+            $finalBoletaDate = trim((string) ($_POST['boleta_date'] ?? ''));
+            $finalBoletaAmountRaw = str_replace(['.', ','], ['', '.'], trim((string) ($_POST['boleta_amount'] ?? '')));
+            $finalBoletaAmount = $finalBoletaAmountRaw !== '' && is_numeric($finalBoletaAmountRaw) ? (float) $finalBoletaAmountRaw : null;
+
+            if ($finalSupervision === '') {
+                throw new RuntimeException('El administrador debe asignarte una dirección antes de guardar las actividades.');
             }
 
-            $existingActivities = $pdo->prepare('SELECT COUNT(*) FROM monthly_report_activities WHERE report_id = :rid');
-            $existingActivities->execute(['rid' => $reportId]);
-            if ((int) $existingActivities->fetchColumn() > 0) {
-                throw new RuntimeException('Las funciones para este informe ya fueron cargadas previamente.');
+            if ($sourceType === 'CONVENIO' && $agreementId > 0) {
+                $agreementStmt = $pdo->prepare('SELECT a.id, a.agreement_number, a.start_date, a.end_date, a.installments_total, a.program_item, a.profession_experience, a.supervision_unit, d.decree_number, d.decree_date
+                                                FROM agreements a
+                                                LEFT JOIN decrees d ON d.id = a.decree_id
+                                                WHERE a.id = :id AND a.honorario_user_id = :uid LIMIT 1');
+                $agreementStmt->execute(['id' => $agreementId, 'uid' => $dbUser['id']]);
+                $agreementRow = $agreementStmt->fetch();
+
+                if ($agreementRow === false) {
+                    throw new RuntimeException('No se encontro el convenio asociado al informe.');
+                }
+
+                $finalProfession = trim((string) ($agreementRow['profession_experience'] ?? $finalProfession));
+                $finalSupervision = $configuredDirectionName;
+                $finalProgram = trim((string) ($agreementRow['program_item'] ?? $finalProgram));
+                $finalDecree = trim((string) ($agreementRow['decree_number'] ?? $finalDecree));
+                $finalStart = trim((string) ($agreementRow['start_date'] ?? $finalStart));
+                $finalEnd = trim((string) ($agreementRow['end_date'] ?? $finalEnd));
+                $maxInstallments = isset($agreementRow['installments_total']) ? (int) $agreementRow['installments_total'] : null;
+                if ($maxInstallments !== null && $maxInstallments > 0) {
+                    if ($finalInstallment === null || $finalInstallment < 1 || $finalInstallment > $maxInstallments) {
+                        throw new RuntimeException('Debes indicar una cuota valida para el convenio.');
+                    }
+                }
+            } elseif ($sourceType === 'MANUAL') {
+                if ($finalProfession === '' || $finalProgram === '' || $finalSupervision === '' || $finalDecree === '' || $finalStart === '' || $finalEnd === '') {
+                    throw new RuntimeException('Completa los datos manuales del informe antes de guardar las actividades.');
+                }
             }
 
-            $functionIds = array_values(array_unique(array_map(static fn ($v): int => (int) $v, $selectedFunctions)));
-            $functionIds = array_values(array_filter($functionIds, static fn (int $v): bool => $v > 0));
+            $boletaPdf = uploadPdf($_FILES['boleta_pdf'] ?? [], 'reports/boletas');
+            $newBoletaAbsolutePath = $boletaPdf !== null
+                ? __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $boletaPdf['stored_path'])
+                : '';
+            $previousBoletaPaths = [];
+            $pdo->beginTransaction();
+            try {
+                $updateReport = $pdo->prepare('UPDATE monthly_reports SET
+                profession_experience = :profession,
+                supervision_unit = :supervision,
+                program_activity_text = :program_text,
+                decree_number_text = :decree_text,
+                agreement_start_date = :start_date,
+                agreement_end_date = :end_date,
+                installment_number = :installment,
+                boleta_number = :boleta_number,
+                boleta_date = :boleta_date,
+                boleta_amount = :boleta_amount
+                WHERE id = :id AND honorario_user_id = :uid');
+            $updateReport->execute([
+                'profession' => $sourceType === 'CONVENIO' ? ($finalProfession !== '' ? $finalProfession : null) : $finalProfession,
+                'supervision' => $sourceType === 'CONVENIO' ? ($finalSupervision !== '' ? $finalSupervision : null) : $finalSupervision,
+                'program_text' => $sourceType === 'CONVENIO' ? ($finalProgram !== '' ? $finalProgram : null) : $finalProgram,
+                'decree_text' => $sourceType === 'CONVENIO' ? ($finalDecree !== '' ? $finalDecree : null) : $finalDecree,
+                'start_date' => $sourceType === 'CONVENIO' ? ($finalStart !== '' ? $finalStart : null) : $finalStart,
+                'end_date' => $sourceType === 'CONVENIO' ? ($finalEnd !== '' ? $finalEnd : null) : $finalEnd,
+                'installment' => $finalInstallment,
+                'boleta_number' => $finalBoletaNumber !== '' ? $finalBoletaNumber : null,
+                'boleta_date' => $finalBoletaDate !== '' ? $finalBoletaDate : null,
+                'boleta_amount' => $finalBoletaAmount,
+                'id' => $reportId,
+                'uid' => $dbUser['id'],
+            ]);
+                if ($boletaPdf !== null) {
+                    $previousBoletaStmt = $pdo->prepare("SELECT stored_path FROM monthly_report_files WHERE report_id = :rid AND file_type = 'BOLETA'");
+                    $previousBoletaStmt->execute(['rid' => $reportId]);
+                    $previousBoletaPaths = $previousBoletaStmt->fetchAll(PDO::FETCH_COLUMN);
 
-            if (count($functionIds) === 0) {
-                throw new RuntimeException('Seleccion de funciones invalida.');
+                    $pdo->prepare("DELETE FROM monthly_report_files WHERE report_id = :rid AND file_type = 'BOLETA'")->execute(['rid' => $reportId]);
+                    $insertBoletaFile = $pdo->prepare("INSERT INTO monthly_report_files (report_id, file_type, original_name, stored_path, mime_type, size_bytes)
+                                                       VALUES (:rid, 'BOLETA', :name, :path, 'application/pdf', :size)");
+                    $insertBoletaFile->execute([
+                        'rid' => $reportId,
+                        'name' => (string) $boletaPdf['original_name'],
+                        'path' => (string) $boletaPdf['stored_path'],
+                        'size' => isset($_FILES['boleta_pdf']['size']) ? (int) $_FILES['boleta_pdf']['size'] : null,
+                    ]);
+                }
+
+                $pdo->prepare('DELETE FROM monthly_report_activities WHERE report_id = :rid')->execute(['rid' => $reportId]);
+
+                if ($sourceType === 'CONVENIO' && $agreementId > 0) {
+                    $functionStmt = $pdo->prepare('SELECT id, function_text FROM agreement_functions WHERE agreement_id = :aid ORDER BY sort_order ASC, id ASC');
+                    $functionStmt->execute(['aid' => $agreementId]);
+                    $functions = $functionStmt->fetchAll();
+
+                    if (count($functions) === 0) {
+                        throw new RuntimeException('El convenio seleccionado no tiene funciones para cargar actividades.');
+                    }
+
+                    $activityTexts = $_POST['activity_texts'] ?? [];
+                    if (!is_array($activityTexts)) {
+                        throw new RuntimeException('Formato de actividades invalido.');
+                    }
+
+                    $insertActivity = $pdo->prepare('INSERT INTO monthly_report_activities (report_id, function_title, activity_description, sort_order) VALUES (:rid, :function_title, :desc, :ord)');
+                    $inserted = 0;
+                    foreach ($functions as $index => $fn) {
+                        $text = isset($activityTexts[$index]) ? trim((string) $activityTexts[$index]) : '';
+                        if ($text === '') {
+                            throw new RuntimeException('Debes completar una actividad para cada funcion del convenio.');
+                        }
+
+                        $insertActivity->execute([
+                            'rid' => $reportId,
+                            'function_title' => (string) ($fn['function_text'] ?? ''),
+                            'desc' => $text,
+                            'ord' => $index + 1,
+                        ]);
+                        $inserted++;
+                    }
+
+                    if ($inserted === 0) {
+                        throw new RuntimeException('No se ingresaron actividades validas.');
+                    }
+                } else {
+                    $manualFunctionTitles = $_POST['manual_function_titles'] ?? [];
+                    $manualActivityTexts = $_POST['manual_activity_texts'] ?? [];
+                    if (!is_array($manualFunctionTitles) || !is_array($manualActivityTexts)) {
+                        throw new RuntimeException('Formato de funciones/actividades manuales invalido.');
+                    }
+
+                    $len = max(count($manualFunctionTitles), count($manualActivityTexts));
+                    $insertActivity = $pdo->prepare('INSERT INTO monthly_report_activities (report_id, function_title, activity_description, sort_order) VALUES (:rid, :function_title, :desc, :ord)');
+                    $inserted = 0;
+                    for ($i = 0; $i < $len; $i++) {
+                        $functionTitle = trim((string) ($manualFunctionTitles[$i] ?? ''));
+                        $activityText = trim((string) ($manualActivityTexts[$i] ?? ''));
+
+                        if ($functionTitle === '' && $activityText === '') {
+                            continue;
+                        }
+                        if ($functionTitle === '' || $activityText === '') {
+                            throw new RuntimeException('Cada fila manual debe incluir funcion y actividad.');
+                        }
+
+                        $inserted++;
+                        $insertActivity->execute([
+                            'rid' => $reportId,
+                            'function_title' => $functionTitle,
+                            'desc' => $activityText,
+                            'ord' => $inserted,
+                        ]);
+                    }
+
+                    if ($inserted === 0) {
+                        throw new RuntimeException('Debes ingresar al menos una funcion con su actividad en el informe manual.');
+                    }
+                }
+
+                $pdo->commit();
+            } catch (Throwable $txe) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                if ($newBoletaAbsolutePath !== '' && is_file($newBoletaAbsolutePath)) {
+                    @unlink($newBoletaAbsolutePath);
+                }
+                throw $txe;
             }
 
-            $inParams = implode(',', array_fill(0, count($functionIds), '?'));
-            $functionSql = 'SELECT id, function_text FROM agreement_functions WHERE agreement_id = ? AND id IN (' . $inParams . ') ORDER BY sort_order, id';
-            $functionStmt = $pdo->prepare($functionSql);
-            $functionStmt->execute(array_merge([(int) $reportRow['agreement_id']], $functionIds));
-            $functions = $functionStmt->fetchAll();
+            if ($boletaPdf !== null) {
+                $uploadsRoot = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+                foreach ($previousBoletaPaths as $previousBoletaPath) {
+                    $previousAbsolutePath = __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $previousBoletaPath);
+                    $resolvedPreviousPath = realpath($previousAbsolutePath);
+                    if (
+                        $uploadsRoot !== false
+                        && $resolvedPreviousPath !== false
+                        && str_starts_with($resolvedPreviousPath, $uploadsRoot . DIRECTORY_SEPARATOR)
+                        && is_file($resolvedPreviousPath)
+                    ) {
+                        @unlink($resolvedPreviousPath);
+                    }
+                }
+            }
+            $selectedReportId = $reportId;
+            $success = 'Actividades del informe guardadas correctamente.';
+        } elseif ($action === 'generate_convenio_pdf') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            prepareConvenioReportPdf($pdo, $reportId, (int) $dbUser['id']);
+            $selectedReportId = $reportId;
+            $success = 'PDF preparado. Ahora puedes revisarlo y enviarlo a firma.';
+        } elseif ($action === 'reopen_rejected') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            $reportStmt = $pdo->prepare("SELECT source_type,finance_rejected_at FROM monthly_reports WHERE id=:id AND honorario_user_id=:uid AND status='RECHAZADO' LIMIT 1");
+            $reportStmt->execute(['id'=>$reportId,'uid'=>$dbUser['id']]);
+            $rejected = $reportStmt->fetch();
+            if ($rejected === false) throw new RuntimeException('El informe no está disponible para corrección.');
+            $source = (string) $rejected['source_type'];
+            $pdo->beginTransaction();
+            $pdo->prepare("UPDATE signature_requests SET status='ANULADO' WHERE report_id=:id AND status='PENDIENTE'")->execute(['id'=>$reportId]);
+            if (trim((string) ($rejected['finance_rejected_at'] ?? '')) === '') {
+                $activeFileStmt = $pdo->prepare("SELECT * FROM monthly_report_files WHERE report_id=:id AND file_type='RESPALDO' ORDER BY id DESC LIMIT 1 FOR UPDATE");
+                $activeFileStmt->execute(['id'=>$reportId]);
+                $activeFile = $activeFileStmt->fetch();
+                if ($activeFile !== false) {
+                    $pdo->prepare("INSERT IGNORE INTO monthly_report_file_history (report_id,source_file_id,stage,original_name,stored_path,mime_type,size_bytes)
+                                   VALUES (:report,:file,'FIRMADO_FUNCIONARIO',:name,:path,:mime,:size)")
+                        ->execute(['report'=>$reportId,'file'=>$activeFile['id'],'name'=>$activeFile['original_name'],'path'=>$activeFile['stored_path'],'mime'=>$activeFile['mime_type'],'size'=>$activeFile['size_bytes']]);
+                    $pdo->prepare("UPDATE monthly_report_files SET file_type='HISTORICO' WHERE id=:id")->execute(['id'=>$activeFile['id']]);
+                }
+                if ($source === 'MANUAL') {
+                    $originalStmt = $pdo->prepare("SELECT original_name,stored_path,mime_type,size_bytes FROM monthly_report_file_history WHERE report_id=:id AND stage='ORIGINAL' ORDER BY id DESC LIMIT 1");
+                    $originalStmt->execute(['id'=>$reportId]);
+                    $original = $originalStmt->fetch();
+                    if ($original !== false && is_file(__DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $original['stored_path']))) {
+                        $pdo->prepare("INSERT INTO monthly_report_files (report_id,file_type,original_name,stored_path,mime_type,size_bytes) VALUES (:report,'RESPALDO',:name,:path,:mime,:size)")
+                            ->execute(['report'=>$reportId,'name'=>$original['original_name'],'path'=>$original['stored_path'],'mime'=>$original['mime_type'],'size'=>$original['size_bytes']]);
+                    }
+                }
+            }
+            $pdo->prepare("UPDATE monthly_reports SET status='BORRADOR' WHERE id=:id")->execute(['id'=>$reportId]);
+            $pdo->commit();
+            $success = $source === 'MANUAL' ? 'Informe abierto para corrección. Puedes conservar el PDF original o eliminarlo y adjuntar uno corregido.' : 'Informe abierto para corrección. Corrige las actividades y prepara nuevamente el PDF.';
+        } elseif ($action === 'save_manual_boleta') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            $number = trim((string) ($_POST['boleta_number'] ?? ''));
+            $date = trim((string) ($_POST['boleta_date'] ?? ''));
+            $amountRaw = str_replace(['.', ','], ['', '.'], trim((string) ($_POST['boleta_amount'] ?? '')));
+            $amount = $amountRaw !== '' && is_numeric($amountRaw) ? (float) $amountRaw : null;
+            $manualStmt = $pdo->prepare("SELECT id FROM monthly_reports WHERE id=:id AND honorario_user_id=:uid AND source_type='MANUAL' AND status IN ('BORRADOR','RECHAZADO') LIMIT 1");
+            $manualStmt->execute(['id'=>$reportId,'uid'=>$dbUser['id']]);
+            if ($manualStmt->fetchColumn() === false) throw new RuntimeException('El informe manual ya no permite modificar la boleta.');
+            $boletaPdf = uploadPdf($_FILES['boleta_pdf'] ?? [], 'reports/boletas');
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare('UPDATE monthly_reports SET boleta_number=:number,boleta_date=:date,boleta_amount=:amount WHERE id=:id AND honorario_user_id=:uid')
+                    ->execute(['number'=>$number !== '' ? $number : null,'date'=>$date !== '' ? $date : null,'amount'=>$amount,'id'=>$reportId,'uid'=>$dbUser['id']]);
+                if ($boletaPdf !== null) {
+                    $pdo->prepare("DELETE FROM monthly_report_files WHERE report_id=:id AND file_type='BOLETA'")->execute(['id'=>$reportId]);
+                    $pdo->prepare("INSERT INTO monthly_report_files (report_id,file_type,original_name,stored_path,mime_type,size_bytes) VALUES (:id,'BOLETA',:name,:path,'application/pdf',:size)")
+                        ->execute(['id'=>$reportId,'name'=>$boletaPdf['original_name'],'path'=>$boletaPdf['stored_path'],'size'=>(int)($_FILES['boleta_pdf']['size']??0)]);
+                }
+                $pdo->commit();
+            } catch (Throwable $manualBoletaError) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $manualBoletaError;
+            }
+            $success = 'Antecedentes de la boleta guardados correctamente.';        } elseif ($action === 'send_signature_request') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            $fileId = (int) ($_POST['file_id'] ?? 0);
 
-            if (count($functions) === 0) {
-                throw new RuntimeException('No se encontraron funciones validas para el convenio seleccionado.');
+            $boletaRequirementStmt = $pdo->prepare("SELECT r.source_type, r.boleta_number, r.boleta_date, r.boleta_amount,
+                                                           EXISTS(SELECT 1 FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = 'BOLETA') AS has_boleta_pdf
+                                                    FROM monthly_reports r
+                                                    WHERE r.id = :id AND r.honorario_user_id = :uid
+                                                    LIMIT 1");
+            $boletaRequirementStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
+            $boletaRequirement = $boletaRequirementStmt->fetch();
+            if ($boletaRequirement === false) {
+                throw new RuntimeException('Informe no encontrado para enviar a firma.');
+            }
+            $missingBoletaData = [];
+            if (trim((string) ($boletaRequirement['boleta_number'] ?? '')) === '') $missingBoletaData[] = 'número de boleta';
+            if (trim((string) ($boletaRequirement['boleta_date'] ?? '')) === '') $missingBoletaData[] = 'fecha de boleta';
+            if ((float) ($boletaRequirement['boleta_amount'] ?? 0) <= 0) $missingBoletaData[] = 'valor líquido de la boleta';
+            if ((int) ($boletaRequirement['has_boleta_pdf'] ?? 0) !== 1) $missingBoletaData[] = 'archivo PDF de la boleta';
+            if ($missingBoletaData !== []) {
+                throw new RuntimeException('Antes de firmar debes completar: ' . implode(', ', $missingBoletaData) . '. Guarda nuevamente el informe y luego intenta firmar.');
+            }
+            $pendingRequestStmt = $pdo->prepare("SELECT id FROM signature_requests WHERE report_id = :id AND status = 'PENDIENTE' LIMIT 1");
+            $pendingRequestStmt->execute(['id' => $reportId]);
+            if ($pendingRequestStmt->fetchColumn() !== false) {
+                throw new RuntimeException('El informe ya fue enviado a firma del funcionario.');
+            }
+            if ($fileId < 1 && isset($_POST['prepare_convenio_pdf'])) {
+                $preparedFile = prepareConvenioReportPdf($pdo, $reportId, (int) $dbUser['id']);
+                $fileId = (int) $preparedFile['file_id'];
             }
 
-            $insertActivity = $pdo->prepare('INSERT INTO monthly_report_activities (report_id, activity_description, sort_order) VALUES (:rid, :desc, :ord)');
-            $sort = 1;
-            foreach ($functions as $fn) {
-                $insertActivity->execute([
-                    'rid' => $reportId,
-                    'desc' => (string) $fn['function_text'],
-                    'ord' => $sort,
-                ]);
-                $sort++;
+            $pdo->prepare('UPDATE monthly_reports r INNER JOIN system_users u ON u.id=r.honorario_user_id SET r.direction_id=u.direction_id WHERE r.id=:id AND r.honorario_user_id=:uid')->execute(['id'=>$reportId,'uid'=>$dbUser['id']]);
+            $signatureDataStmt = $pdo->prepare('SELECT r.id, r.report_month, r.report_year, r.provider_name, r.direction_id, u.id AS user_id, u.first_names, u.last_names, u.full_name, u.email, f.id AS file_id,
+                                                       EXISTS(SELECT 1 FROM signature_requests signed_sr WHERE signed_sr.report_file_id = f.id AND signed_sr.status = \'FIRMADO\') AS is_signed
+                                                FROM monthly_reports r
+                                                INNER JOIN system_users u ON u.id = r.honorario_user_id
+                                                INNER JOIN monthly_report_files f ON f.report_id = r.id AND f.file_type = \'RESPALDO\'
+                                                WHERE r.id = :rid AND f.id = :fid AND r.honorario_user_id = :uid
+                                                LIMIT 1');
+            $signatureDataStmt->execute(['rid' => $reportId, 'fid' => $fileId, 'uid' => $dbUser['id']]);
+            $signatureData = $signatureDataStmt->fetch();
+            if ($signatureData === false) {
+                throw new RuntimeException('No fue posible encontrar el informe que deseas firmar.');
             }
 
-            $success = 'Funciones cargadas correctamente. Desde ahora las actividades del informe podran alinearse a esas funciones.';
+            if ((int) ($signatureData['direction_id'] ?? 0) < 1) {
+                throw new RuntimeException('El administrador debe asignarte una dirección antes de enviar el informe.');
+            }
+
+            if ((int) ($signatureData['is_signed'] ?? 0) === 1) {
+                throw new RuntimeException('Este informe ya fue firmado y no se puede volver a enviar para firma.');
+            }
+
+            $recipientEmail = trim((string) ($signatureData['email'] ?? ''));
+            if ($recipientEmail === '' || filter_var($recipientEmail, FILTER_VALIDATE_EMAIL) === false) {
+                throw new RuntimeException('Debes solicitar al administrador que registre un correo válido en tus datos personales.');
+            }
+
+            $rawToken = bin2hex(random_bytes(32));
+            $tokenHash = hash('sha256', $rawToken);
+            $expiresAt = (new DateTimeImmutable('+24 hours'))->format('Y-m-d H:i:s');
+            $pdo->prepare("UPDATE signature_requests SET status = 'ANULADO' WHERE report_file_id = :fid AND status = 'PENDIENTE'")->execute(['fid' => $fileId]);
+            $insertRequest = $pdo->prepare('INSERT INTO signature_requests (report_id, report_file_id, honorario_user_id, recipient_email, token_hash, expires_at)
+                                            VALUES (:rid, :fid, :uid, :email, :token, :expires)');
+            $insertRequest->execute([
+                'rid' => $reportId,
+                'fid' => $fileId,
+                'uid' => $dbUser['id'],
+                'email' => $recipientEmail,
+                'token' => $tokenHash,
+                'expires' => $expiresAt,
+            ]);
+            $requestId = (int) $pdo->lastInsertId();
+
+            $signUrl = appUrl('firmar.php?token=' . rawurlencode($rawToken));
+            $recipientName = trim((string) ($signatureData['first_names'] ?? '') . ' ' . (string) ($signatureData['last_names'] ?? ''));
+            if ($recipientName === '') $recipientName = (string) $signatureData['full_name'];
+            $subject = 'Firma de informe mensual - ' . (int) $signatureData['report_month'] . '/' . (int) $signatureData['report_year'];
+            $safeName = htmlspecialchars($recipientName, ENT_QUOTES, 'UTF-8');
+            $safeUrl = htmlspecialchars($signUrl, ENT_QUOTES, 'UTF-8');
+            $message = '<html><body style="font-family:Arial,sans-serif;color:#17324a">'
+                . '<h2>Firma de informe mensual</h2>'
+                . '<p>Hola ' . $safeName . ',</p>'
+                . '<p>Se ha solicitado tu firma para el informe mensual. Abre el siguiente enlace desde tu teléfono o computador:</p>'
+                . '<p><a href="' . $safeUrl . '" style="display:inline-block;padding:12px 18px;background:#0b7285;color:#fff;text-decoration:none;border-radius:8px">Revisar y firmar informe</a></p>'
+                . '<p>Este enlace es personal, solo puede utilizarse una vez y vence en 24 horas. No lo compartas.</p>'
+                . '</body></html>';
+            $textMessage = "Hola {$recipientName},\n\nRevisa y firma tu informe en: {$signUrl}\n\nEl enlace vence en 24 horas y solo puede utilizarse una vez.";
+
+            try {
+                sendSmtpMail($recipientEmail, $recipientName, $subject, $message, $textMessage);
+            } catch (Throwable $mailError) {
+                $pdo->prepare("UPDATE signature_requests SET status = 'ANULADO' WHERE id = :id")->execute(['id' => $requestId]);
+                throw new RuntimeException('No fue posible enviar el correo SMTP: ' . $mailError->getMessage());
+            }
+
+            $pdo->prepare('UPDATE signature_requests SET sent_at = NOW() WHERE id = :id')->execute(['id' => $requestId]);
+            $success = 'Enlace seguro de firma enviado a ' . $recipientEmail . '.';
+        } elseif ($action === 'delete_report') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            if ($reportId < 1) {
+                throw new RuntimeException('Informe no válido para eliminar.');
+            }
+
+            $storedPaths = [];
+            $pdo->beginTransaction();
+            try {
+                $reportStmt = $pdo->prepare('SELECT r.id, r.status, r.director_signed_at, r.submitted_at,
+                                                    EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_id = r.id AND (sr.sent_at IS NOT NULL OR sr.status IN (\'PENDIENTE\', \'FIRMADO\', \'EXPIRADO\'))) AS has_signature_request
+                                             FROM monthly_reports r
+                                             WHERE r.id = :id AND r.honorario_user_id = :uid
+                                             LIMIT 1
+                                             FOR UPDATE');
+                $reportStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
+                $reportToDelete = $reportStmt->fetch();
+                if ($reportToDelete === false) {
+                    throw new RuntimeException('Informe no encontrado para eliminar.');
+                }
+
+                if (
+                    (string) ($reportToDelete['status'] ?? '') !== 'BORRADOR'
+                    || trim((string) ($reportToDelete['submitted_at'] ?? '')) !== ''
+                    || (int) ($reportToDelete['has_signature_request'] ?? 0) === 1
+                ) {
+                    throw new RuntimeException('El informe no se puede borrar porque ya fue enviado a firma.');
+                }
+                $filePathsStmt = $pdo->prepare('SELECT stored_path FROM monthly_report_files WHERE report_id = :rid');
+                $filePathsStmt->execute(['rid' => $reportId]);
+                $storedPaths = array_merge($storedPaths, $filePathsStmt->fetchAll(PDO::FETCH_COLUMN));
+
+                $signaturePathsStmt = $pdo->prepare('SELECT signed_signature_path
+                                                     FROM signature_requests
+                                                     WHERE report_id = :rid AND signed_signature_path IS NOT NULL');
+                $signaturePathsStmt->execute(['rid' => $reportId]);
+                $storedPaths = array_merge($storedPaths, $signaturePathsStmt->fetchAll(PDO::FETCH_COLUMN));
+
+                $deleteReportStmt = $pdo->prepare('DELETE FROM monthly_reports WHERE id = :id AND honorario_user_id = :uid');
+                $deleteReportStmt->execute(['id' => $reportId, 'uid' => $dbUser['id']]);
+                if ($deleteReportStmt->rowCount() !== 1) {
+                    throw new RuntimeException('No fue posible eliminar el informe.');
+                }
+
+                $pdo->commit();
+            } catch (Throwable $deleteError) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $deleteError;
+            }
+
+            $uploadsRoot = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+            foreach (array_unique(array_filter(array_map('strval', $storedPaths))) as $storedPath) {
+                $isStillReferenced = false;
+                $referenceQueries = [
+                    'SELECT 1 FROM monthly_report_files WHERE stored_path = :path LIMIT 1',
+                    'SELECT 1 FROM signature_requests WHERE signed_signature_path = :path LIMIT 1',
+                    'SELECT 1 FROM agreements WHERE pdf_path = :path LIMIT 1',
+                    'SELECT 1 FROM decrees WHERE pdf_path = :path LIMIT 1',
+                    'SELECT 1 FROM honorario_signatures WHERE stored_path = :path LIMIT 1',
+                    'SELECT 1 FROM director_profiles WHERE signature_path = :path LIMIT 1',
+                ];
+
+                try {
+                    foreach ($referenceQueries as $referenceQuery) {
+                        $referenceStmt = $pdo->prepare($referenceQuery);
+                        $referenceStmt->execute(['path' => $storedPath]);
+                        if ($referenceStmt->fetchColumn() !== false) {
+                            $isStillReferenced = true;
+                            break;
+                        }
+                    }
+                } catch (Throwable $cleanupReferenceError) {
+                    $isStillReferenced = true;
+                }
+
+                if ($isStillReferenced || $uploadsRoot === false) {
+                    continue;
+                }
+
+                $absolutePath = __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $storedPath);
+                $resolvedPath = realpath($absolutePath);
+                if (
+                    $resolvedPath !== false
+                    && str_starts_with($resolvedPath, $uploadsRoot . DIRECTORY_SEPARATOR)
+                    && is_file($resolvedPath)
+                ) {
+                    @unlink($resolvedPath);
+                }
+            }
+
+            $selectedReportId = 0;
+            $success = 'Informe eliminado correctamente.';
+        } elseif ($action === 'delete_pdf') {
+            $reportId = (int) ($_POST['report_id'] ?? 0);
+            $fileId = (int) ($_POST['file_id'] ?? 0);
+
+            $fileStmt = $pdo->prepare('SELECT f.id, f.stored_path,
+                                              EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_file_id = f.id AND sr.status = \'FIRMADO\') AS is_signed
+                                       FROM monthly_report_files f
+                                       INNER JOIN monthly_reports r ON r.id = f.report_id
+                                       WHERE f.id = :fid
+                                         AND f.report_id = :rid
+                                         AND f.file_type = \'RESPALDO\'
+                                         AND r.honorario_user_id = :uid
+                                       LIMIT 1');
+            $fileStmt->execute(['fid' => $fileId, 'rid' => $reportId, 'uid' => $dbUser['id']]);
+            $pdfToDelete = $fileStmt->fetch();
+            if ($pdfToDelete === false) {
+                throw new RuntimeException('PDF no encontrado para eliminar.');
+            }
+
+            if ((int) ($pdfToDelete['is_signed'] ?? 0) === 1) {
+                throw new RuntimeException('El informe firmado no se puede borrar.');
+            }
+
+            $storedPath = (string) $pdfToDelete['stored_path'];
+            $absolutePath = __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $storedPath);
+            $uploadsRoot = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+            $resolvedPath = realpath($absolutePath);
+
+            $pdo->prepare('DELETE FROM monthly_report_files WHERE id = :id')->execute(['id' => $fileId]);
+            if (
+                $uploadsRoot !== false
+                && $resolvedPath !== false
+                && str_starts_with($resolvedPath, $uploadsRoot . DIRECTORY_SEPARATOR)
+                && is_file($resolvedPath)
+            ) {
+                unlink($resolvedPath);
+            }
+
+            $success = 'PDF eliminado. Ahora puedes cargar uno nuevo.';
         } elseif ($action === 'upload_pdf') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
 
@@ -209,6 +1166,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Throwable $e) {
         $error = $e->getMessage();
+        if ($action === 'create_report') {
+            $showCreateForm = true;
+            $selectedCreateSource = $sourceType ?? $selectedCreateSource;
+        }
     }
 }
 
@@ -218,9 +1179,28 @@ $reportsStmt = $pdo->prepare('SELECT
     r.report_year,
     r.source_type,
     r.status,
+    r.director_signed_at,
+    r.finance_approved_at,
+    r.finance_rejected_at,
+    r.finance_observation,
+    r.submitted_at,
     r.created_at,
     r.agreement_id,
+    r.provider_name,
+    r.profession_experience,
+    r.supervision_unit,
+    r.program_activity_text,
+    r.decree_number_text,
+    r.agreement_start_date,
+    r.agreement_end_date,
+    r.installment_number,
+    r.boleta_number,
+    r.boleta_date,
+    r.boleta_amount,
+    r.director_rejection_observation,
     (SELECT COUNT(*) FROM monthly_report_activities a WHERE a.report_id = r.id) AS activities_count,
+    (SELECT COUNT(*) FROM signature_requests sr WHERE sr.report_id = r.id AND (sr.sent_at IS NOT NULL OR sr.status IN (\'PENDIENTE\', \'FIRMADO\', \'EXPIRADO\'))) AS signature_requests_count,
+    (SELECT COUNT(*) FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = \'BOLETA\') AS boleta_file_count,
     (SELECT COUNT(*) FROM monthly_report_files f WHERE f.report_id = r.id AND f.file_type = \'RESPALDO\') AS pdf_count
 FROM monthly_reports r
 WHERE r.honorario_user_id = :uid
@@ -228,9 +1208,90 @@ ORDER BY r.report_year DESC, r.report_month DESC, r.id DESC');
 $reportsStmt->execute(['uid' => $dbUser['id']]);
 $reports = $reportsStmt->fetchAll();
 
+$pdfFilesByReport = [];
+if (count($reports) > 0) {
+    $pdfFileStmt = $pdo->prepare('SELECT f.id, f.report_id, f.original_name, f.size_bytes,
+                                         EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_file_id = f.id AND sr.status = \'FIRMADO\') AS is_signed,
+                                         EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_file_id = f.id AND sr.status = \'PENDIENTE\') AS is_pending_signature
+                                  FROM monthly_report_files f
+                                  INNER JOIN monthly_reports r ON r.id = f.report_id
+                                  WHERE r.honorario_user_id = :uid AND f.file_type = \'RESPALDO\'
+                                  ORDER BY f.id DESC');
+    $pdfFileStmt->execute(['uid' => $dbUser['id']]);
+    foreach ($pdfFileStmt->fetchAll() as $pdfFileRow) {
+        $reportKey = (int) $pdfFileRow['report_id'];
+        if (!isset($pdfFilesByReport[$reportKey])) {
+            $pdfFilesByReport[$reportKey] = $pdfFileRow;
+        }
+    }
+}
+$boletaFilesByReport = [];
+if (count($reports) > 0) {
+    $boletaFileStmt = $pdo->prepare("SELECT f.id, f.report_id, f.original_name, f.stored_path
+                                     FROM monthly_report_files f
+                                     INNER JOIN monthly_reports r ON r.id = f.report_id
+                                     WHERE r.honorario_user_id = :uid AND f.file_type = 'BOLETA'
+                                     ORDER BY f.id DESC");
+    $boletaFileStmt->execute(['uid' => $dbUser['id']]);
+    foreach ($boletaFileStmt->fetchAll() as $boletaFileRow) {
+        $reportKey = (int) $boletaFileRow['report_id'];
+        if (!isset($boletaFilesByReport[$reportKey])) {
+            $boletaFilesByReport[$reportKey] = $boletaFileRow;
+        }
+    }
+}
+$reportsById = [];
+foreach ($reports as $reportRow) {
+    $reportsById[(int) $reportRow['id']] = $reportRow;
+}
+
+$selectedReportCanEditActivities = false;
+if ($selectedReportId > 0 && isset($reportsById[$selectedReportId])) {
+    $selectedReportState = $reportsById[$selectedReportId];
+    $selectedReportPdf = $pdfFilesByReport[$selectedReportId] ?? null;
+    $selectedStatus = (string) ($selectedReportState['status'] ?? '');
+    $selectedHasDirectorSignature = in_array($selectedStatus, ['APROBADO','APROBADO_PAGO'], true)
+        || trim((string) ($selectedReportState['director_signed_at'] ?? '')) !== '';
+    $selectedHasPendingSignature = $selectedReportPdf !== null
+        && (int) ($selectedReportPdf['is_pending_signature'] ?? 0) === 1;
+    $selectedHasEmployeeSignature = $selectedReportPdf !== null
+        && (int) ($selectedReportPdf['is_signed'] ?? 0) === 1;
+
+    $selectedReportCanEditActivities = $selectedStatus === 'RECHAZADO'
+        || (
+            !$selectedHasDirectorSignature
+            && !$selectedHasPendingSignature
+            && !$selectedHasEmployeeSignature
+            && $selectedStatus !== 'ENVIADO'
+        );
+}
+
+$activityRows = [];
+if (count($reports) > 0) {
+    $reportIds = array_map(static fn (array $row): int => (int) $row['id'], $reports);
+    $inReportIds = implode(',', array_fill(0, count($reportIds), '?'));
+    $activityStmt = $pdo->prepare('SELECT report_id, function_title, activity_description, sort_order FROM monthly_report_activities WHERE report_id IN (' . $inReportIds . ') ORDER BY report_id ASC, sort_order ASC, id ASC');
+    $activityStmt->execute($reportIds);
+    foreach ($activityStmt->fetchAll() as $activityRow) {
+        $reportKey = (int) $activityRow['report_id'];
+        if (!isset($activityRows[$reportKey])) {
+            $activityRows[$reportKey] = [];
+        }
+        $activityRows[$reportKey][] = [
+            'function_title' => (string) ($activityRow['function_title'] ?? ''),
+            'activity_description' => (string) $activityRow['activity_description'],
+        ];
+    }
+}
+
 $agreementMap = [];
 foreach ($agreements as $a) {
     $agreementMap[(int) $a['id']] = (string) $a['agreement_number'];
+}
+
+$agreementById = [];
+foreach ($agreements as $a) {
+    $agreementById[(int) $a['id']] = $a;
 }
 
 $agreementFunctionsMap = [];
@@ -256,7 +1317,8 @@ function statusBadge(string $s): string
         'BORRADOR'  => ['bg' => '#f1f5f9', 'color' => '#475569', 'label' => 'Borrador'],
         'ENVIADO'   => ['bg' => '#eff6ff', 'color' => '#1d4ed8', 'label' => 'Enviado'],
         'OBSERVADO' => ['bg' => '#fffbeb', 'color' => '#b45309', 'label' => 'Observado'],
-        'APROBADO'  => ['bg' => '#f0fdf4', 'color' => '#15803d', 'label' => 'Aprobado'],
+        'APROBADO'  => ['bg' => '#f0fdf4', 'color' => '#15803d', 'label' => 'Finalizado'],
+        'APROBADO_PAGO' => ['bg' => '#dcfce7', 'color' => '#166534', 'label' => 'Aprobado para pago'],
         'RECHAZADO' => ['bg' => '#fef2f2', 'color' => '#b91c1c', 'label' => 'Rechazado'],
     ];
     $d = $map[$s] ?? ['bg' => '#f1f5f9', 'color' => '#475569', 'label' => htmlspecialchars($s, ENT_QUOTES, 'UTF-8')];
@@ -434,6 +1496,12 @@ function statusBadge(string $s): string
             flex-wrap: wrap;
             margin-bottom: 24px;
         }
+        .page-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
         .page-title { margin: 0; font-size: 1.55rem; font-weight: 700; color: var(--text); }
         .page-subtitle { margin: 4px 0 0; color: var(--text-muted); font-size: .9rem; }
 
@@ -459,6 +1527,12 @@ function statusBadge(string $s): string
             box-shadow: var(--shadow);
             margin-bottom: 24px;
             overflow: hidden;
+        }
+        .create-report-card {
+            display: none;
+        }
+        .create-report-card.is-visible {
+            display: block;
         }
         .card-header {
             padding: 18px 24px 14px;
@@ -489,6 +1563,132 @@ function statusBadge(string $s): string
             flex-shrink: 0;
         }
         .card-body { padding: 22px 24px; }
+        .report-activity-card {
+            border-top: 3px solid var(--primary);
+        }
+        .modal-bg {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+            background: rgba(10, 26, 43, .52);
+            z-index: 220;
+        }
+        .pdf-preview-box {
+            width: min(1100px, 96vw);
+            height: min(850px, 92vh);
+            display: flex;
+            flex-direction: column;
+        }
+        .pdf-preview-frame {
+            width: 100%;
+            flex: 1;
+            min-height: 0;
+            border: 0;
+            background: #eef2f6;
+        }
+        .pdf-preview-body {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .pdf-preview-footer {
+            display: none;
+            justify-content: flex-end;
+            padding: 14px 18px;
+            border-top: 1px solid var(--border);
+            background: #fff;
+        }
+        .pdf-preview-footer.is-visible {
+            display: flex;
+        }
+        .modal-box {
+            width: min(760px, 100%);
+            background: #fff;
+            border-radius: 18px;
+            border: 1px solid var(--border);
+            box-shadow: 0 24px 60px rgba(6, 22, 38, .26);
+            overflow: hidden;
+        }
+        .modal-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 18px 20px 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        .modal-head h3 {
+            margin: 0;
+            font-size: 1.02rem;
+            font-weight: 800;
+            color: var(--text);
+        }
+        .modal-head p {
+            margin: 6px 0 0;
+            color: var(--text-muted);
+            font-size: .9rem;
+            line-height: 1.4;
+        }
+        .modal-close {
+            border: 1px solid var(--border);
+            background: #fff;
+            color: var(--text-muted);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+        .modal-body {
+            padding: 18px 20px 20px;
+        }
+        .choice-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 4px;
+        }
+        .choice-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 16px;
+            background: #fff;
+            text-align: left;
+            cursor: pointer;
+            transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+            width: 100%;
+        }
+        .choice-card:hover {
+            transform: translateY(-1px);
+            border-color: #b8d8e4;
+            box-shadow: 0 8px 22px rgba(11,60,100,.08);
+        }
+        .choice-card h4 {
+            margin: 0 0 6px;
+            font-size: 1rem;
+            color: var(--text);
+        }
+        .choice-card p {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: .86rem;
+            line-height: 1.35;
+        }
+        .choice-emoji {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            display: inline-grid;
+            place-items: center;
+            background: var(--primary-light);
+            color: var(--primary-hover);
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
 
         /* ── Form ── */
         .field-group {
@@ -587,6 +1787,54 @@ function statusBadge(string $s): string
             display: flex;
             align-items: center;
             gap: 6px;
+        }
+
+        .activity-field-stack {
+            display: grid;
+            gap: 12px;
+        }
+
+        .activity-textarea {
+            min-height: 120px;
+        }
+
+        .manual-row-header {
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+        }
+
+        .manual-row-header .field {
+            flex: 1;
+        }
+
+        .manual-row-remove {
+            flex: 0 0 auto;
+            width: 34px;
+            height: 34px;
+            border: 1px solid #f3c2c2;
+            border-radius: 999px;
+            background: #fff1f1;
+            color: #b42318;
+            font-size: 1rem;
+            font-weight: 800;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .manual-row-remove:hover {
+            background: #ffe2e2;
+            border-color: #e59a9a;
+        }
+
+        .source-panel {
+            display: none;
+            margin-top: 12px;
+            gap: 10px;
+        }
+
+        .source-panel.is-visible {
+            display: grid;
         }
 
         /* ── Table ── */
@@ -698,6 +1946,40 @@ function statusBadge(string $s): string
             font-size: .76rem;
         }
 
+        .uploaded-pdf-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .uploaded-pdf-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            color: #334e68;
+            font-size: .82rem;
+            font-weight: 600;
+        }
+        .uploaded-pdf-name {
+            max-width: 230px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .uploaded-pdf-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .btn-delete-pdf {
+            border-color: #f3c2c2;
+            background: #fff1f1;
+            color: #b42318;
+        }
+        .btn-delete-pdf:hover { background: #ffe2e2; }
         /* ── Responsive ── */
         @media (max-width: 860px) {
             .shell { display: block; }
@@ -755,6 +2037,12 @@ function statusBadge(string $s): string
                         <h1 class="page-title">Informe mensual</h1>
                         <p class="page-subtitle">Registra y gestiona tus informes de actividades mensuales</p>
                     </div>
+                    <div class="page-header-actions">
+                        <button class="btn" type="button" id="openCreateChoiceBtn" aria-controls="createChoiceModal" aria-expanded="false">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
+                            Crear informe
+                        </button>
+                    </div>
                 </div>
 
                 <?php if ($success !== ''): ?>
@@ -771,12 +2059,13 @@ function statusBadge(string $s): string
                 <?php endif; ?>
 
         <!-- Formulario -->
-        <div class="card">
+        <div class="card create-report-card<?php echo $showCreateForm ? ' is-visible' : ''; ?>" id="createReportCard"<?php echo $showCreateForm ? ' style="display:block;"' : ''; ?> data-selected-source="<?php echo htmlspecialchars($selectedCreateSource, ENT_QUOTES, 'UTF-8'); ?>">
             <div class="card-header">
                 <h2><span class="step">1</span> Crear nuevo informe</h2>
+                <span class="create-source-pill" id="createSourcePill">Modalidad: <?php echo $selectedCreateSource === 'MANUAL' ? 'Manual con PDF' : 'Convenio almacenado'; ?></span>
             </div>
             <div class="card-body">
-                <form method="post" id="reportForm">
+                <form method="post" enctype="multipart/form-data" id="reportForm">
                     <input type="hidden" name="action" value="create_report">
 
                     <p class="form-section-title">Datos del periodo y prestador</p>
@@ -803,6 +2092,10 @@ function statusBadge(string $s): string
                             <label>Profesión / Oficio / Experiencia</label>
                             <input name="profession_experience" required value="<?php echo htmlspecialchars((string) ($dbUser['profession_experience'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
                         </div>
+                        <div class="field">
+                            <label>Dirección o unidad de supervisión</label>
+                            <input name="supervision_unit" id="supervisionInput" required readonly value="<?php echo htmlspecialchars($configuredDirectionName !== '' ? $configuredDirectionName : 'Sin dirección asignada', ENT_QUOTES, 'UTF-8'); ?>"><small>Dirección asignada por el administrador.</small>
+                        </div>
                     </div>
 
                     <p class="form-section-title">Origen del informe</p>
@@ -810,9 +2103,9 @@ function statusBadge(string $s): string
                         <div class="field">
                             <label>Tipo de origen</label>
                             <div class="source-toggle">
-                                <input type="radio" name="source_type" id="srcConvenio" value="CONVENIO" checked>
+                                <input type="radio" name="source_type" id="srcConvenio" value="CONVENIO" <?php echo $selectedCreateSource === 'CONVENIO' ? 'checked' : ''; ?>>
                                 <label for="srcConvenio">Convenio</label>
-                                <input type="radio" name="source_type" id="srcManual" value="MANUAL">
+                                <input type="radio" name="source_type" id="srcManual" value="MANUAL" <?php echo $selectedCreateSource === 'MANUAL' ? 'checked' : ''; ?>>
                                 <label for="srcManual">Manual</label>
                             </div>
                         </div>
@@ -824,10 +2117,13 @@ function statusBadge(string $s): string
                                     <option
                                         value="<?php echo (int) $a['id']; ?>"
                                         data-program="<?php echo htmlspecialchars((string) $a['program_item'], ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-profession="<?php echo htmlspecialchars((string) ($a['profession_experience'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-supervision="<?php echo htmlspecialchars((string) ($a['supervision_unit'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
                                         data-decree="<?php echo htmlspecialchars((string) ($a['decree_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
                                         data-start="<?php echo htmlspecialchars((string) $a['start_date'], ENT_QUOTES, 'UTF-8'); ?>"
                                         data-end="<?php echo htmlspecialchars((string) $a['end_date'], ENT_QUOTES, 'UTF-8'); ?>"
                                         data-installments="<?php echo htmlspecialchars((string) ($a['installments_total'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-next-installment="<?php echo htmlspecialchars((string) ($a['next_installment'] ?? 1), ENT_QUOTES, 'UTF-8'); ?>"
                                     >
                                         <?php echo htmlspecialchars((string) $a['agreement_number'] . ' — ' . (string) $a['program_item'], ENT_QUOTES, 'UTF-8'); ?>
                                     </option>
@@ -842,6 +2138,76 @@ function statusBadge(string $s): string
                             <label>N° cuota (si aplica)</label>
                             <input type="number" min="1" name="installment_number" id="installmentInput" placeholder="Ej: 3">
                         </div>
+                        <div class="field">
+                            <label>N° boleta</label>
+                            <input name="boleta_number" id="boletaNumberInput" placeholder="Ej: BOL-2026-041">
+                        </div>
+                        <div class="field">
+                            <label>Fecha de boleta</label>
+                            <input type="date" name="boleta_date" id="boletaDateInput">
+                        </div>
+                        <div class="field">
+                            <label>Valor líquido de la boleta</label>
+                            <input type="number" min="0" step="1" name="boleta_amount" id="boletaAmountInput" placeholder="Ej: 805125">
+                        </div>
+                    </div>
+
+                    <div class="source-panel<?php echo $selectedCreateSource === 'MANUAL' ? ' is-visible' : ''; ?>" id="manualPdfPanel">
+                            <div class="field">
+                                <label>PDF del informe</label>
+                                <input type="file" name="report_pdf_manual" id="reportPdfManual" accept="application/pdf">
+                            </div>
+                            <div class="field">
+                                <label>PDF del convenio</label>
+                                <input type="file" name="agreement_pdf_manual" id="agreementPdfManual" accept="application/pdf">
+                            </div>
+                            <div class="field">
+                                <label>PDF del decreto</label>
+                                <input type="file" name="decree_pdf_manual" id="decreePdfManual" accept="application/pdf">
+                            </div>
+                            <div class="field">
+                                <label>PDF de la boleta</label>
+                                <input type="file" name="boleta_pdf_manual" id="boletaPdfManual" accept="application/pdf">
+                            </div>
+                            <div class="field" style="padding: 12px 0 0;">
+                                <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.88rem;font-weight:700;color:var(--text);">
+                                    <input type="checkbox" name="save_profile_records" id="saveProfileRecords">
+                                    Guardar convenio y decreto en mi perfil
+                                </label>
+                                <p class="form-footer-note" style="margin:8px 0 0;display:block;">
+                                    Si marcas esta opción, el convenio y decreto se almacenarán para reutilizarlos en futuros informes.
+                                </p>
+                            </div>
+                            <div id="manualProfileFields" class="source-panel" style="margin-top:6px; display:none;">
+                                <div class="field-group field-group-3">
+                                    <div class="field">
+                                        <label>N° convenio</label>
+                                        <input name="agreement_number_manual" id="agreementNumberManual" placeholder="Ej: CONV-2026-014">
+                                    </div>
+                                    <div class="field">
+                                        <label>Fecha convenio</label>
+                                        <input type="date" name="agreement_date_manual" id="agreementDateManual">
+                                    </div>
+                                    <div class="field">
+                                        <label>Total de cuotas</label>
+                                        <input type="number" min="1" name="installments_total_manual" id="installmentsTotalManual" placeholder="Ej: 12">
+                                    </div>
+                                </div>
+                                <div class="field-group field-group-2">
+                                    <div class="field">
+                                        <label>Fecha decreto</label>
+                                        <input type="date" name="decree_date_manual" id="decreeDateManual">
+                                    </div>
+                                    <div class="field">
+                                        <label>Referencia para guardar en perfil</label>
+                                        <input value="Usa el N° de decreto indicado arriba" readonly>
+                                    </div>
+                                </div>
+                            </div>
+                        <p class="form-footer-note" style="margin:0;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                En la modalidad manual, puedes adjuntar el informe, convenio, decreto y boleta desde este mismo formulario.
+                        </p>
                     </div>
 
                     <p class="form-section-title">Detalles del convenio</p>
@@ -861,10 +2227,13 @@ function statusBadge(string $s): string
                     </div>
 
                     <div class="form-footer">
-                        <button class="btn" type="submit">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
-                            Crear informe
-                        </button>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button class="btn" type="submit">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
+                                Crear informe
+                            </button>
+                            <button class="btn btn-ghost" type="button" id="cancelCreateReportBtn">Cancelar</button>
+                        </div>
                         <span class="form-footer-note">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                             El informe se guardará en estado Borrador. La carga de actividades queda para la próxima etapa.
@@ -875,16 +2244,225 @@ function statusBadge(string $s): string
             </div>
         </div>
 
-        <!-- Listado -->
-        <div class="card">
+        <div class="modal-bg" id="createChoiceModal" aria-hidden="true">
+            <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="createChoiceTitle">
+                <div class="modal-head">
+                    <div>
+                        <h3 id="createChoiceTitle">¿Qué tipo de informe deseas crear?</h3>
+                        <p>Elige si el informe se relaciona a un convenio almacenado o si cargarás un PDF ya preparado.</p>
+                    </div>
+                    <button class="modal-close" type="button" id="closeCreateChoiceModal" aria-label="Cerrar">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="choice-grid">
+                        <button class="choice-card" type="button" data-create-source="CONVENIO">
+                            <span class="choice-emoji">C</span>
+                            <h4>Relacionarlo a un convenio</h4>
+                            <p>Autocompleta los datos desde el convenio guardado y luego registra una actividad por cada función.</p>
+                        </button>
+                        <button class="choice-card" type="button" data-create-source="MANUAL">
+                            <span class="choice-emoji">P</span>
+                            <h4>Cargar informe en PDF</h4>
+                            <p>Ingresa los datos manualmente y adjunta el PDF del informe en el mismo formulario.</p>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-bg" id="pdfPreviewModal" aria-hidden="true">
+            <div class="modal-box pdf-preview-box" role="dialog" aria-modal="true" aria-labelledby="pdfPreviewTitle">
+                <div class="modal-head">
+                    <div>
+                        <h3 id="pdfPreviewTitle">Informe</h3>
+                        <p>Documento PDF cargado.</p>
+                    </div>
+                    <button class="modal-close" type="button" id="closePdfPreviewModal" aria-label="Cerrar vista previa">×</button>
+                </div>
+                <div class="pdf-preview-body">
+                    <iframe class="pdf-preview-frame" id="pdfPreviewFrame" title="Vista previa del informe PDF"></iframe>
+                </div>
+                <div class="pdf-preview-footer" id="pdfPreviewFooter">
+                    <form method="post" id="previewSignForm" data-signature-request-form>
+                        <input type="hidden" name="action" value="send_signature_request">
+                        <input type="hidden" name="report_id" id="previewSignReportId" value="">
+                        <input type="hidden" name="file_id" value="0">
+                        <input type="hidden" name="prepare_convenio_pdf" value="1">
+                        <button class="btn" type="submit">Firmar</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <?php if (
+            $selectedReportId > 0
+            && isset($reportsById[$selectedReportId])
+            && (string) $reportsById[$selectedReportId]['source_type'] === 'CONVENIO'
+            && $selectedReportCanEditActivities
+        ): ?>
+        <?php
+            $selectedReport = $reportsById[$selectedReportId];
+            $selectedAgreementId = (int) ($selectedReport['agreement_id'] ?? 0);
+            $selectedAgreement = $selectedAgreementId > 0 ? ($agreementById[$selectedAgreementId] ?? null) : null;
+            $selectedFunctions = $selectedAgreementId > 0 ? ($agreementFunctionsMap[$selectedAgreementId] ?? []) : [];
+            $selectedActivities = $activityRows[$selectedReportId] ?? [];
+            $selectedBoletaFile = $boletaFilesByReport[$selectedReportId] ?? null;
+            $selectedMissingBoletaFields = [];
+            if (trim((string) ($selectedReport['boleta_number'] ?? '')) === '') $selectedMissingBoletaFields[] = 'número de boleta';
+            if (trim((string) ($selectedReport['boleta_date'] ?? '')) === '') $selectedMissingBoletaFields[] = 'fecha de boleta';
+            if ((float) ($selectedReport['boleta_amount'] ?? 0) <= 0) $selectedMissingBoletaFields[] = 'valor líquido de la boleta';
+            if ($selectedBoletaFile === null) $selectedMissingBoletaFields[] = 'archivo PDF de la boleta';
+            $selectedMissingBoletaMessage = implode(', ', $selectedMissingBoletaFields);
+            $isSelectedConvenio = (string) $selectedReport['source_type'] === 'CONVENIO';
+            $installmentsTotal = $selectedAgreement !== null ? (int) ($selectedAgreement['installments_total'] ?? 0) : 0;
+        ?>
+        <div class="card report-activity-card" id="reportActivitiesCard">
             <div class="card-header">
-                <h2><span class="step">2</span> Informes registrados</h2>
+                <h2><span class="step">2</span> Completar actividades del informe</h2>
+                <a class="btn btn-ghost btn-sm" href="#reportForm">Volver a crear</a>
+            </div>
+            <div class="card-body">
+                <form method="post" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="save_activities">
+                    <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+
+                    <p class="form-section-title">Datos del informe</p>
+                    <div class="field-group field-group-4">
+                        <div class="field">
+                            <label>Mes</label>
+                            <input value="<?php echo htmlspecialchars($monthNames[(int) $selectedReport['report_month']] ?? (string) $selectedReport['report_month'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
+                        </div>
+                        <div class="field">
+                            <label>Año</label>
+                            <input value="<?php echo htmlspecialchars((string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
+                        </div>
+                        <div class="field col-span-2">
+                            <label>Nombre del prestador del servicio</label>
+                            <input name="provider_name" value="<?php echo htmlspecialchars((string) $selectedReport['provider_name'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
+                        </div>
+                        <div class="field">
+                            <label>Profesión, oficio y/o experiencia</label>
+                            <input name="profession_experience" value="<?php echo htmlspecialchars((string) ($selectedReport['profession_experience'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
+                        </div>
+                        <div class="field">
+                            <label>Dirección o unidad de supervisión</label>
+                            <input name="supervision_unit" value="<?php echo htmlspecialchars($configuredDirectionName !== '' ? $configuredDirectionName : (string) ($selectedReport['supervision_unit'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" readonly>
+                        </div>
+                        <div class="field col-span-2">
+                            <label>Programa, Convenio y/o Actividad</label>
+                            <textarea name="program_activity_text" class="activity-textarea" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>><?php echo htmlspecialchars((string) ($selectedReport['program_activity_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                        </div>
+                        <div class="field">
+                            <label>N° Decreto que aprueba el convenio</label>
+                            <input name="decree_number_text" value="<?php echo htmlspecialchars((string) ($selectedReport['decree_number_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
+                        </div>
+                        <div class="field">
+                            <label>Vigencia inicio</label>
+                            <input type="date" name="agreement_start_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_start_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
+                        </div>
+                        <div class="field">
+                            <label>Vigencia fin</label>
+                            <input type="date" name="agreement_end_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_end_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
+                        </div>
+                        <div class="field">
+                            <label>N° de cuota</label>
+                            <?php if ($isSelectedConvenio && $installmentsTotal > 0): ?>
+                                <select name="installment_number">
+                                    <?php for ($i = 1; $i <= $installmentsTotal; $i++): ?>
+                                        <option value="<?php echo $i; ?>" <?php echo (int) ($selectedReport['installment_number'] ?? 0) === $i ? 'selected' : ''; ?>><?php echo $i; ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            <?php else: ?>
+                                <input type="number" min="1" name="installment_number" value="<?php echo htmlspecialchars((string) ($selectedReport['installment_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                            <?php endif; ?>
+                        </div>
+                        <div class="field">
+                            <label>N° boleta</label>
+                            <input name="boleta_number" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                        </div>
+                        <div class="field">
+                            <label>Fecha de boleta</label>
+                            <input type="date" name="boleta_date" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                        </div>
+                        <div class="field">
+                            <label>Valor líquido de la boleta</label>
+                            <input type="number" min="0" step="1" name="boleta_amount" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_amount'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: 805125">
+                        </div>
+                        <div class="field col-span-2">
+                            <label>Archivo de la boleta (PDF)</label>
+                            <?php if ($selectedBoletaFile !== null): ?>
+                                <p class="form-footer-note" style="margin:0 0 8px;">Archivo cargado: <?php echo htmlspecialchars((string) $selectedBoletaFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></p>
+                            <?php endif; ?>
+                            <input type="file" name="boleta_pdf" accept="application/pdf">
+                            <small><?php echo $selectedBoletaFile !== null ? 'Selecciona un PDF solo si deseas reemplazar la boleta.' : 'Debe estar adjunto antes de enviar el informe a firma.'; ?></small>
+                        </div>
+                    </div>
+
+                    <div class="options-note" style="margin-top:14px;">
+                        <p><strong>Antecedentes de la boleta.</strong> Puedes guardar el informe sin estos datos, pero el número, la fecha, el valor líquido y el archivo PDF serán obligatorios antes de firmarlo.</p>
+                    </div>
+
+                    <p class="form-section-title">Actividades</p>
+                    <?php if ($isSelectedConvenio && count($selectedFunctions) > 0): ?>
+                        <div class="activity-field-stack">
+                            <?php foreach ($selectedFunctions as $index => $fn): ?>
+                                <div class="field">
+                                    <label><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></label>
+                                    <textarea class="activity-textarea" name="activity_texts[]" required><?php echo htmlspecialchars((string) (($selectedActivities[$index]['activity_description'] ?? '')), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <?php $manualRows = count($selectedActivities) > 0 ? $selectedActivities : [['function_title' => '', 'activity_description' => '']]; ?>
+                        <div id="manualFunctionsActivitiesRows" class="activity-field-stack">
+                            <?php foreach ($manualRows as $index => $row): ?>
+                            <div class="field" data-manual-row>
+                                <div class="manual-row-header">
+                                    <div class="field">
+                                        <label>Función <?php echo $index + 1; ?></label>
+                                        <input name="manual_function_titles[]" value="<?php echo htmlspecialchars((string) ($row['function_title'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: Función de coordinación territorial">
+                                    </div>
+                                    <button class="manual-row-remove" type="button" data-remove-manual-row title="Borrar esta función y sus actividades" aria-label="Borrar esta función y sus actividades">×</button>
+                                </div>
+                                <label style="margin-top:8px;">Actividad de la función <?php echo $index + 1; ?></label>
+                                <textarea class="activity-textarea" name="manual_activity_texts[]" placeholder="Describe las actividades realizadas para esta función..."><?php echo htmlspecialchars((string) ($row['activity_description'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <div style="margin-top:10px;">
+                            <button class="btn btn-ghost btn-sm" type="button" id="addManualFunctionActivityRow">Agregar función</button>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="form-footer">
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button class="btn" type="submit">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
+                                Guardar actividades
+                            </button>
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>" data-preview-sign-report="<?php echo (int) $selectedReportId; ?>" data-missing-boleta="<?php echo htmlspecialchars($selectedMissingBoletaMessage, ENT_QUOTES, 'UTF-8'); ?>">Vista previa</button>
+                            <a class="btn btn-ghost" href="informe_mensual.php" title="Al cerrar puede continuar su edición después">Cerrar</a>
+                        </div>
+                        <span class="form-footer-note">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                            Si el informe es de convenio, completa una actividad por cada funcion. Si es manual, registra la actividad principal.
+                        </span>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <!-- Listado -->
+        <?php if (!$showCreateForm && ($selectedReportId <= 0 || (isset($reportsById[$selectedReportId]) && (string) $reportsById[$selectedReportId]['source_type'] === 'MANUAL'))): ?>
+        <div class="card" id="reportsListCard">
+            <div class="card-header">
+                <h2><span class="step">3</span> Informes registrados</h2>
                 <span style="font-size:.82rem;color:var(--text-muted);"><?php echo count($reports); ?> informe<?php echo count($reports) !== 1 ? 's' : ''; ?></span>
             </div>
             <div class="card-body" style="padding-bottom: 0;">
                 <div class="options-note">
-                    <p><strong>Opcion 1: Generar informe en el sistema.</strong> Esta opcion crea una base de actividades a partir de las funciones definidas en el convenio. Debes seleccionar funciones que mantengan coherencia entre lo pactado en el convenio y las actividades que declararas en el informe mensual. Esta carga se realiza una sola vez por informe y solo aplica a informes con origen CONVENIO.</p>
-                    <p><strong>Opcion 2: Agregar informe en PDF.</strong> Esta opcion permite adjuntar directamente el informe ya preparado fuera del sistema (por ejemplo, en Word y luego exportado a PDF), dejando respaldo formal del documento final.</p>
+                    <p><strong>Informes de convenio.</strong> Selecciona el informe para completar una actividad por cada funcion del convenio.</p>
+                    <p><strong>Informes manuales.</strong> Solo debes adjuntar el PDF del informe final.</p>
                 </div>
             </div>
             <div class="table-wrap">
@@ -907,6 +2485,28 @@ function statusBadge(string $s): string
                             $isConvenio = (string) $r['source_type'] === 'CONVENIO';
                             $hasActivities = (int) ($r['activities_count'] ?? 0) > 0;
                             $functionsForAgreement = $agreementFunctionsMap[$agreementId] ?? [];
+                            $uploadedReportPdf = $pdfFilesByReport[$reportId] ?? null;
+                            $isSignedReportPdf = $uploadedReportPdf !== null && (int) ($uploadedReportPdf['is_signed'] ?? 0) === 1;
+                            $isPendingEmployeeSignature = $uploadedReportPdf !== null && (int) ($uploadedReportPdf['is_pending_signature'] ?? 0) === 1;
+                            $hasDirectorSignature = in_array((string) ($r['status'] ?? ''), ['APROBADO','APROBADO_PAGO'], true)
+                                || trim((string) ($r['director_signed_at'] ?? '')) !== '';
+                            $isFinalizedReport = $hasDirectorSignature;
+                            $canDeleteReport = (string) ($r['status'] ?? '') === 'BORRADOR'
+                                && trim((string) ($r['submitted_at'] ?? '')) === ''
+                                && (int) ($r['signature_requests_count'] ?? 0) === 0;
+                            $missingBoletaFields = [];
+                            if (trim((string) ($r['boleta_number'] ?? '')) === '') $missingBoletaFields[] = 'número de boleta';
+                            if (trim((string) ($r['boleta_date'] ?? '')) === '') $missingBoletaFields[] = 'fecha de boleta';
+                            if ((float) ($r['boleta_amount'] ?? 0) <= 0) $missingBoletaFields[] = 'valor líquido de la boleta';
+                            if ((int) ($r['boleta_file_count'] ?? 0) < 1) $missingBoletaFields[] = 'archivo PDF de la boleta';
+                            $missingBoletaMessage = implode(', ', $missingBoletaFields);
+                            $canCompleteActivities = (string) ($r['status'] ?? '') === 'RECHAZADO'
+                                || (
+                                    !$isPendingEmployeeSignature
+                                    && !$isSignedReportPdf
+                                    && !$hasDirectorSignature
+                                    && (string) ($r['status'] ?? '') !== 'ENVIADO'
+                                );
                         ?>
                         <tr>
                             <td class="td-period">
@@ -921,49 +2521,130 @@ function statusBadge(string $s): string
                             <td><?php echo htmlspecialchars((string) ($agreementMap[$agreementId] ?? '—'), ENT_QUOTES, 'UTF-8'); ?></td>
                             <td><?php echo statusBadge((string) $r['status']); ?></td>
                             <td>
-                                <span class="btn btn-muted btn-sm">
-                                    <?php echo (int) ($r['activities_count'] ?? 0); ?> actividad<?php echo (int) ($r['activities_count'] ?? 0) !== 1 ? 'es' : ''; ?>
-                                </span>
+                                <?php if ($isConvenio): ?>
+                                    <span class="btn btn-muted btn-sm">
+                                        <?php echo (int) ($r['activities_count'] ?? 0); ?> actividad<?php echo (int) ($r['activities_count'] ?? 0) !== 1 ? 'es' : ''; ?>
+                                    </span>
+                                <?php else: ?>
+                                    <span class="btn btn-muted btn-sm">No aplica</span>
+                                <?php endif; ?>
                             </td>
                             <td class="actions-cell">
                                 <div class="action-stack">
+                                    <?php if ((string) $r['status'] === 'RECHAZADO'): ?>
+                                    <div class="action-box" style="border-color:#fecaca;background:#fff7f7">
+                                        <h4><?php echo trim((string)($r['finance_rejected_at'] ?? '')) !== '' ? 'Informe rechazado por Finanzas' : 'Informe devuelto para corrección'; ?></h4>
+                                        <p><strong>Observación:</strong> <?php echo htmlspecialchars((string) (
+                                            trim((string)($r['finance_observation'] ?? '')) !== ''
+                                                ? $r['finance_observation']
+                                                : ($r['director_rejection_observation'] ?? $r['observations'] ?? '')
+                                        ), ENT_QUOTES, 'UTF-8'); ?></p>
+                                        <form method="post"><input type="hidden" name="action" value="reopen_rejected"><input type="hidden" name="report_id" value="<?php echo $reportId; ?>"><button class="btn btn-sm" type="submit">Corregir y enviar nuevamente</button></form>
+                                    </div>
+                                    <?php endif; ?>
+                                    <?php if ($isConvenio && $canCompleteActivities): ?>
+                                    <div class="action-box">
+                                        <h4>1) Completar actividades</h4>
+                                        <p>Abre el formulario superior para cargar las actividades asociadas a este informe.</p>
+                                        <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>#reportActivitiesCard">Completar actividades</a>
+                                    </div>
+                                    <?php endif; ?>
+
                                     <?php if ($isConvenio): ?>
                                     <div class="action-box">
-                                        <h4>1) Generar informe con funciones del convenio</h4>
-                                        <p>Selecciona las funciones que aplican a este informe. Esta carga se ejecuta solo una vez por informe.</p>
-                                        <?php if ($hasActivities): ?>
-                                            <span class="btn btn-muted btn-sm">Funciones ya cargadas</span>
-                                        <?php elseif (count($functionsForAgreement) === 0): ?>
-                                            <span class="btn btn-muted btn-sm">Sin funciones en el convenio</span>
+                                        <?php if ($isFinalizedReport && $uploadedReportPdf !== null): ?>
+                                        <h4>Proceso de firmas finalizado</h4>
+                                        <div class="uploaded-pdf-actions">
+                                            <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver informe</button>
+                                            <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=CERTIFICATE&amp;report_id=<?php echo $reportId; ?>">Ver certificado</button>
+                                            <button class="btn btn-ghost btn-sm" type="button" data-print-bundle="<?php echo $reportId; ?>" title="Unir e imprimir expediente" aria-label="Unir e imprimir informe, boleta, certificado, decreto y convenio">🖨</button>
+                                        </div>
+                                        <?php elseif ($isSignedReportPdf && $uploadedReportPdf !== null): ?>
+                                        <h4>2) Enviado a Firma (Director(a))</h4>
+                                        <div class="uploaded-pdf-actions">
+                                            <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver informe</button>
+                                        </div>
+                                        <?php elseif ($isPendingEmployeeSignature && $uploadedReportPdf !== null): ?>
+                                        <h4>2) Enviado a Firma (Funcionario)</h4>
+                                        <div class="uploaded-pdf-actions">
+                                            <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver informe</button>
+                                        </div>
                                         <?php else: ?>
-                                            <form method="post">
-                                                <input type="hidden" name="action" value="add_functions">
-                                                <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
-                                                <div class="functions-list">
-                                                    <?php foreach ($functionsForAgreement as $fn): ?>
-                                                    <label class="fn-check">
-                                                        <input type="checkbox" name="function_items[]" value="<?php echo (int) $fn['id']; ?>">
-                                                        <span><?php echo htmlspecialchars((string) $fn['text'], ENT_QUOTES, 'UTF-8'); ?></span>
-                                                    </label>
-                                                    <?php endforeach; ?>
+                                        <h4>2) Firmar informe</h4>
+                                        <p>Recibirás un enlace en tu correo para revisar y firmar el informe.</p>
+                                        <button
+                                            class="btn btn-sm"
+                                            type="button"
+                                            data-send-signature-report="<?php echo $reportId; ?>"
+                                            data-missing-boleta="<?php echo htmlspecialchars($missingBoletaMessage, ENT_QUOTES, 'UTF-8'); ?>"
+                                        >Firmar</button>
+                                        <?php endif; ?>
+                                    </div>
+                                    <?php endif; ?>
+
+                                    <?php if (!$isConvenio): ?>
+                                    <div class="action-box">
+                                        <h4><?php echo $isFinalizedReport ? 'Proceso de firmas finalizado' : ($isSignedReportPdf ? 'Enviado a Firma (Director(a))' : ($isPendingEmployeeSignature ? 'Enviado a Firma (Funcionario)' : 'Adjuntar informe en PDF')); ?></h4>
+                                        <?php if (!$isPendingEmployeeSignature && !$isSignedReportPdf && !$isFinalizedReport): ?>
+                                            <form method="post" enctype="multipart/form-data" class="manual-boleta-form" style="display:grid;grid-template-columns:1fr 1fr 1fr 1.4fr auto;gap:8px;margin-bottom:12px;align-items:end">
+                                                <input type="hidden" name="action" value="save_manual_boleta"><input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                                <label>N.º boleta<input name="boleta_number" value="<?php echo htmlspecialchars((string)($r['boleta_number'] ?? ''),ENT_QUOTES,'UTF-8'); ?>"></label>
+                                                <label>Fecha<input type="date" name="boleta_date" value="<?php echo htmlspecialchars((string)($r['boleta_date'] ?? ''),ENT_QUOTES,'UTF-8'); ?>"></label>
+                                                <label>Valor líquido<input type="number" min="0" step="1" name="boleta_amount" value="<?php echo htmlspecialchars((string)($r['boleta_amount'] ?? ''),ENT_QUOTES,'UTF-8'); ?>"></label>
+                                                <label>PDF de boleta<input type="file" name="boleta_pdf" accept="application/pdf"></label>
+                                                <button class="btn btn-sm" type="submit">Guardar boleta</button>
+                                            </form>
+                                        <?php endif; ?>                                        <?php if ($uploadedReportPdf !== null): ?>
+                                            <div class="uploaded-pdf-row">
+                                                <div class="uploaded-pdf-info" title="<?php echo htmlspecialchars((string) $uploadedReportPdf['original_name'], ENT_QUOTES, 'UTF-8'); ?>">
+                                                    <span aria-hidden="true">✓</span>
+                                                    <span class="uploaded-pdf-name"><?php echo htmlspecialchars((string) $uploadedReportPdf['original_name'], ENT_QUOTES, 'UTF-8'); ?></span>
                                                 </div>
-                                                <button class="btn btn-sm" type="submit">Generar informe</button>
+                                                <div class="uploaded-pdf-actions">
+                                                    <?php if ($isSignedReportPdf): ?>
+                                                        <button class="btn btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver Informe</button>
+                                                        <?php if ($isFinalizedReport): ?>
+                                                            <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=CERTIFICATE&amp;report_id=<?php echo $reportId; ?>">Ver certificado</button>
+                                                            <button class="btn btn-ghost btn-sm" type="button" data-print-bundle="<?php echo $reportId; ?>" title="Unir e imprimir expediente" aria-label="Unir e imprimir informe, boleta, certificado, decreto y convenio">🖨</button>
+                                                        <?php endif; ?>
+                                                    <?php elseif ($isPendingEmployeeSignature): ?>
+                                                        <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Vista previa</button>
+                                                    <?php else: ?>
+                                                        <form method="post" class="upload-inline" data-delete-pdf-form>
+                                                            <input type="hidden" name="action" value="delete_pdf">
+                                                            <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                                            <input type="hidden" name="file_id" value="<?php echo (int) $uploadedReportPdf['id']; ?>">
+                                                            <button class="btn btn-sm btn-delete-pdf" type="submit">Borrar</button>
+                                                        </form>
+                                                        <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Vista previa</button>
+                                                        <form method="post" class="upload-inline" data-signature-request-form data-missing-boleta="<?php echo htmlspecialchars($missingBoletaMessage, ENT_QUOTES, 'UTF-8'); ?>">
+                                                            <input type="hidden" name="action" value="send_signature_request">
+                                                            <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                                            <input type="hidden" name="file_id" value="<?php echo (int) $uploadedReportPdf['id']; ?>">
+                                                            <button class="btn btn-sm" type="submit">Firmar</button>
+                                                        </form>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        <?php else: ?>
+                                            <p>Adjunta el archivo PDF del informe final realizado fuera del sistema.</p>
+                                            <form method="post" enctype="multipart/form-data" class="upload-inline">
+                                                <input type="hidden" name="action" value="upload_pdf">
+                                                <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                                <input type="file" name="report_pdf" accept="application/pdf" required>
+                                                <button class="btn btn-sm" type="submit">Subir PDF</button>
                                             </form>
                                         <?php endif; ?>
                                     </div>
                                     <?php endif; ?>
 
-                                    <div class="action-box">
-                                        <h4>2) Agregar informe en PDF</h4>
-                                        <p>Adjunta el archivo PDF del informe final realizado fuera del sistema.</p>
-                                        <form method="post" enctype="multipart/form-data" class="upload-inline">
-                                            <input type="hidden" name="action" value="upload_pdf">
-                                            <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
-                                            <input type="file" name="report_pdf" accept="application/pdf" required>
-                                            <button class="btn btn-sm" type="submit">Subir PDF</button>
-                                            <span class="btn btn-muted btn-sm"><?php echo (int) ($r['pdf_count'] ?? 0); ?> PDF</span>
-                                        </form>
-                                    </div>
+                                    <?php if ($canDeleteReport): ?>
+                                    <form method="post" data-delete-report-form>
+                                        <input type="hidden" name="action" value="delete_report">
+                                        <input type="hidden" name="report_id" value="<?php echo $reportId; ?>">
+                                        <button class="btn btn-sm btn-delete-pdf" type="submit">Borrar informe</button>
+                                    </form>
+                                    <?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -978,43 +2659,535 @@ function statusBadge(string $s): string
                 </table>
             </div>
         </div>
+        <?php endif; ?>
 
             </main>
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <script>
         const srcConvenio    = document.getElementById('srcConvenio');
         const srcManual      = document.getElementById('srcManual');
         const agreementSelect = document.getElementById('agreementSelect');
         const agreementWrap  = document.getElementById('agreementSelectWrap');
+        const professionInput = document.querySelector('input[name="profession_experience"]');
+        const supervisionInput = document.getElementById('supervisionInput');
         const programInput   = document.getElementById('programInput');
         const decreeInput    = document.getElementById('decreeInput');
         const startInput     = document.getElementById('startInput');
         const endInput       = document.getElementById('endInput');
         const installmentInput = document.getElementById('installmentInput');
+        const createCard = document.getElementById('createReportCard');
+        const createChoiceModal = document.getElementById('createChoiceModal');
+        const openCreateChoiceBtn = document.getElementById('openCreateChoiceBtn');
+        const closeCreateChoiceModal = document.getElementById('closeCreateChoiceModal');
+        const choiceCards = document.querySelectorAll('[data-create-source]');
+        const manualPdfPanel = document.getElementById('manualPdfPanel');
+        const manualProfileFields = document.getElementById('manualProfileFields');
+        const saveProfileRecords = document.getElementById('saveProfileRecords');
+        const reportPdfManual = document.getElementById('reportPdfManual');
+        const agreementPdfManual = document.getElementById('agreementPdfManual');
+        const decreePdfManual = document.getElementById('decreePdfManual');
+        const boletaPdfManual = document.getElementById('boletaPdfManual');
+        const boletaNumberInput = document.getElementById('boletaNumberInput');
+        const boletaDateInput = document.getElementById('boletaDateInput');
+        const createSourcePill = document.getElementById('createSourcePill');
+        const agreementNumberManual = document.getElementById('agreementNumberManual');
+        const agreementDateManual = document.getElementById('agreementDateManual');
+        const installmentsTotalManual = document.getElementById('installmentsTotalManual');
+        const decreeDateManual = document.getElementById('decreeDateManual');
+        const reportsListCard = document.getElementById('reportsListCard');
+        const reportActivitiesCard = document.getElementById('reportActivitiesCard');
 
         function applyAgreementData() {
             const opt = agreementSelect.options[agreementSelect.selectedIndex];
             if (!opt || !opt.value) return;
+            if (opt.dataset.profession && professionInput) professionInput.value = opt.dataset.profession;
+
             if (opt.dataset.program)      programInput.value = opt.dataset.program;
             if (opt.dataset.decree)       decreeInput.value  = opt.dataset.decree;
             if (opt.dataset.start)        startInput.value   = opt.dataset.start;
             if (opt.dataset.end)          endInput.value     = opt.dataset.end;
-            if (opt.dataset.installments) installmentInput.value = opt.dataset.installments;
+            if (installmentInput) {
+                const installmentsTotal = Number(opt.dataset.installments || 0);
+                const nextInstallment = Number(opt.dataset.nextInstallment || 1);
+                if (installmentsTotal > 0) installmentInput.max = String(installmentsTotal);
+                else installmentInput.removeAttribute('max');
+                installmentInput.value = installmentsTotal > 0 && nextInstallment > installmentsTotal ? '' : String(nextInstallment);
+            }
+        }
+
+        function setCreateSource(source) {
+            const isManual = source === 'MANUAL';
+            srcManual.checked = isManual;
+            srcConvenio.checked = !isManual;
+            agreementWrap.style.display = isManual ? 'none' : 'flex';
+            agreementSelect.disabled = isManual;
+            manualPdfPanel.classList.toggle('is-visible', isManual);
+            manualPdfPanel.style.display = isManual ? 'grid' : 'none';
+            reportPdfManual.required = isManual;
+            if (boletaNumberInput) boletaNumberInput.required = isManual;
+            if (boletaDateInput) boletaDateInput.required = isManual;
+            if (!isManual && manualProfileFields) {
+                manualProfileFields.style.display = 'none';
+            }
+            if (createSourcePill) {
+                createSourcePill.textContent = isManual ? 'Modalidad: Manual con PDF' : 'Modalidad: Convenio almacenado';
+            }
+            if (!isManual) {
+                applyAgreementData();
+            }
+            toggleManualProfileFields();
+        }
+
+        function toggleManualProfileFields() {
+            const isManual = srcManual.checked;
+            const saveProfile = !!(saveProfileRecords && saveProfileRecords.checked);
+            if (!manualProfileFields) {
+                return;
+            }
+
+            manualProfileFields.style.display = isManual && saveProfile ? 'grid' : 'none';
+            if (agreementPdfManual) agreementPdfManual.required = isManual && saveProfile;
+            if (decreePdfManual) decreePdfManual.required = isManual && saveProfile;
+            if (boletaPdfManual) boletaPdfManual.required = isManual;
+            if (agreementNumberManual) agreementNumberManual.required = isManual && saveProfile;
+            if (agreementDateManual) agreementDateManual.required = isManual && saveProfile;
+            if (installmentsTotalManual) installmentsTotalManual.required = isManual && saveProfile;
+            if (decreeDateManual) decreeDateManual.required = isManual && saveProfile;
+            if (decreeInput) decreeInput.required = isManual && saveProfile;
         }
 
         function toggleSource() {
             const isManual = srcManual.checked;
-            agreementWrap.style.display = isManual ? 'none' : 'flex';
-            agreementSelect.disabled = isManual;
-            if (!isManual) applyAgreementData();
+            setCreateSource(isManual ? 'MANUAL' : 'CONVENIO');
         }
 
         srcConvenio.addEventListener('change', toggleSource);
         srcManual.addEventListener('change', toggleSource);
         agreementSelect.addEventListener('change', applyAgreementData);
+        if (saveProfileRecords) {
+            saveProfileRecords.addEventListener('change', toggleManualProfileFields);
+        }
         toggleSource();
+        toggleManualProfileFields();
     </script>
-</body>
+<script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const cancelButton = document.getElementById('cancelCreateReportBtn');
+            const confirmRemoveManualRow = function () {
+                if (typeof window.Swal === 'undefined') {
+                    return Promise.resolve(window.confirm('Se eliminará esta función con sus actividades. ¿Deseas continuar?'));
+                }
+
+                return window.Swal.fire({
+                    title: '¿Eliminar función?',
+                    text: 'Se borrará esta función junto con las actividades asociadas en esta vista.',
+                    icon: 'warning',
+                    showCancelButton: true,
+                    confirmButtonText: 'Sí, borrar',
+                    cancelButtonText: 'Cancelar',
+                    confirmButtonColor: '#b42318',
+                    cancelButtonColor: '#086374',
+                    reverseButtons: true,
+                    focusCancel: true,
+                    background: '#ffffff',
+                    color: '#1e3a5f'
+                }).then(function (result) {
+                    return result.isConfirmed;
+                });
+            };
+
+            document.querySelectorAll('[data-delete-pdf-form]').forEach(function (form) {
+                form.addEventListener('submit', function (event) {
+                    if (!window.confirm('¿Deseas borrar el PDF cargado? Podrás seleccionar uno nuevo después.')) {
+                        event.preventDefault();
+                    }
+                });
+            });
+
+            document.querySelectorAll('[data-delete-report-form]').forEach(function (form) {
+                form.addEventListener('submit', function (event) {
+                    event.preventDefault();
+
+                    if (typeof window.Swal === 'undefined') {
+                        if (window.confirm('¿Deseas borrar este informe? Se eliminarán sus actividades, archivos y solicitudes de firma.')) {
+                            HTMLFormElement.prototype.submit.call(form);
+                        }
+                        return;
+                    }
+
+                    window.Swal.fire({
+                        title: '¿Borrar informe?',
+                        text: 'Se eliminarán el informe, sus actividades, archivos y solicitudes de firma. Esta acción no se puede deshacer.',
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonText: 'Sí, borrar informe',
+                        cancelButtonText: 'Cancelar',
+                        confirmButtonColor: '#b42318',
+                        cancelButtonColor: '#086374',
+                        reverseButtons: true,
+                        focusCancel: true,
+                        background: '#ffffff',
+                        color: '#1e3a5f'
+                    }).then(function (result) {
+                        if (!result.isConfirmed) return;
+
+                        window.Swal.fire({
+                            title: 'Eliminando informe',
+                            text: 'Espere un momento.',
+                            allowOutsideClick: false,
+                            allowEscapeKey: false,
+                            showConfirmButton: false,
+                            didOpen: function () {
+                                window.Swal.showLoading();
+                            }
+                        });
+                        HTMLFormElement.prototype.submit.call(form);
+                    });
+                });
+            });
+            const pdfPreviewModal = document.getElementById('pdfPreviewModal');
+            const pdfPreviewFrame = document.getElementById('pdfPreviewFrame');
+            const closePdfPreviewModalButton = document.getElementById('closePdfPreviewModal');
+            const pdfPreviewFooter = document.getElementById('pdfPreviewFooter');
+            const previewSignForm = document.getElementById('previewSignForm');
+            const previewSignReportId = document.getElementById('previewSignReportId');
+
+            const closePdfPreview = function () {
+                if (!pdfPreviewModal) return;
+                pdfPreviewModal.style.display = 'none';
+                pdfPreviewModal.setAttribute('aria-hidden', 'true');
+                if (pdfPreviewFrame) pdfPreviewFrame.removeAttribute('src');
+                if (pdfPreviewFooter) pdfPreviewFooter.classList.remove('is-visible');
+                if (previewSignReportId) previewSignReportId.value = '';
+                document.body.style.overflow = '';
+            };
+
+            document.querySelectorAll('[data-preview-pdf]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    if (!pdfPreviewModal || !pdfPreviewFrame) return;
+                    pdfPreviewFrame.src = button.dataset.previewPdf || '';
+                    const signReportId = button.dataset.previewSignReport || '';
+                    if (previewSignReportId) previewSignReportId.value = signReportId;
+                    if (previewSignForm) previewSignForm.dataset.missingBoleta = button.dataset.missingBoleta || '';
+                    if (pdfPreviewFooter) pdfPreviewFooter.classList.toggle('is-visible', signReportId !== '');
+                    pdfPreviewModal.style.display = 'flex';
+                    pdfPreviewModal.setAttribute('aria-hidden', 'false');
+                    document.body.style.overflow = 'hidden';
+                });
+            });
+
+            const submitSignatureRequest = function (form) {
+                const missingBoleta = (form.dataset.missingBoleta || '').trim();
+                if (missingBoleta !== '') {
+                    const warningText = 'Antes de firmar debes completar: ' + missingBoleta + '. Guarda nuevamente el informe y luego intenta firmar.';
+                    if (typeof window.Swal !== 'undefined') {
+                        window.Swal.fire({
+                            title: 'Faltan antecedentes de la boleta',
+                            text: warningText,
+                            icon: 'warning',
+                            confirmButtonText: 'Entendido',
+                            confirmButtonColor: '#086374'
+                        });
+                    } else {
+                        window.alert(warningText);
+                    }
+                    return;
+                }
+
+                const sendRequest = function () {
+                    if (typeof window.Swal !== 'undefined') {
+                        window.Swal.fire({
+                            title: 'Enviando informe a firma',
+                            text: 'Espere un momento mientras enviamos el correo.',
+                            allowOutsideClick: false,
+                            allowEscapeKey: false,
+                            showConfirmButton: false,
+                            didOpen: function () {
+                                window.Swal.showLoading();
+                            }
+                        });
+                        window.setTimeout(function () {
+                            HTMLFormElement.prototype.submit.call(form);
+                        }, 150);
+                        return;
+                    }
+
+                    form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+                        button.disabled = true;
+                        button.textContent = 'Enviando informe a firma';
+                    });
+                    HTMLFormElement.prototype.submit.call(form);
+                };
+
+                if (typeof window.Swal === 'undefined') {
+                    if (window.confirm('¿Está seguro que desea enviar el informe a firma?\n\nLo recibirá en su correo para firmar.')) {
+                        sendRequest();
+                    }
+                    return;
+                }
+
+                window.Swal.fire({
+                    title: '¿Está seguro que desea enviar el informe a firma?',
+                    text: 'Lo recibirá en su correo para firmar.',
+                    icon: 'question',
+                    showCancelButton: true,
+                    confirmButtonText: 'Firmar',
+                    cancelButtonText: 'Cancelar',
+                    confirmButtonColor: '#086374',
+                    cancelButtonColor: '#64748b',
+                    reverseButtons: true,
+                    focusCancel: true
+                }).then(function (result) {
+                    if (result.isConfirmed) {
+                        sendRequest();
+                    }
+                });
+            };
+
+            document.querySelectorAll('[data-signature-request-form]').forEach(function (form) {
+                form.addEventListener('submit', function (event) {
+                    event.preventDefault();
+                    submitSignatureRequest(form);
+                });
+            });
+
+            document.querySelectorAll('[data-send-signature-report]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    if (!previewSignForm || !previewSignReportId) return;
+                    previewSignReportId.value = button.dataset.sendSignatureReport || '';
+                    previewSignForm.dataset.missingBoleta = button.dataset.missingBoleta || '';
+                    submitSignatureRequest(previewSignForm);
+                });
+            });
+            let bundleObjectUrl = '';
+            document.querySelectorAll('[data-print-bundle]').forEach(function (button) {
+                button.addEventListener('click', async function () {
+                    const reportId = button.dataset.printBundle || '';
+                    if (!reportId || typeof window.PDFLib === 'undefined') return;
+                    const documents = [
+                        ['REPORT', 'informe'], ['BOLETA', 'boleta'], ['CERTIFICATE', 'certificado'], ['DECREE', 'decreto'], ['AGREEMENT', 'convenio']
+                    ];
+                    if (typeof window.Swal !== 'undefined') window.Swal.fire({title:'Preparando expediente',text:'Uniendo informe, boleta, certificado, decreto y convenio.',allowOutsideClick:false,allowEscapeKey:false,showConfirmButton:false,didOpen:function(){window.Swal.showLoading();}});
+                    try {
+                        const responses = await Promise.all(documents.map(function (documentInfo) {
+                            return fetch('informe_mensual.php?action=view_document_pdf&report_id=' + encodeURIComponent(reportId) + '&type=' + documentInfo[0]);
+                        }));
+                        const missing = responses.map(function (response,index) { return response.ok ? '' : documents[index][1]; }).filter(Boolean);
+                        if (missing.length) throw new Error('No se puede completar el expediente. Faltan: ' + missing.join(', ') + '.');
+                        const merged = await PDFLib.PDFDocument.create();
+                        for (let index=0; index<responses.length; index++) {
+                            const source = await PDFLib.PDFDocument.load(await responses[index].arrayBuffer());
+                            const pages = await merged.copyPages(source, source.getPageIndices());
+                            pages.forEach(function (page) { merged.addPage(page); });
+                        }
+                        const mergedBytes = await merged.save();
+                        if (bundleObjectUrl) URL.revokeObjectURL(bundleObjectUrl);
+                        bundleObjectUrl = URL.createObjectURL(new Blob([mergedBytes], {type:'application/pdf'}));
+                        if (typeof window.Swal !== 'undefined') window.Swal.close();
+                        if (pdfPreviewModal && pdfPreviewFrame) {
+                            pdfPreviewFrame.src = bundleObjectUrl;
+                            pdfPreviewModal.style.display = 'flex';
+                            pdfPreviewModal.setAttribute('aria-hidden','false');
+                            document.body.style.overflow='hidden';
+                        } else {
+                            window.open(bundleObjectUrl, '_blank', 'noopener');
+                        }
+                    } catch (bundleError) {
+                        const message = bundleError.message || 'No fue posible unir los documentos.';
+                        if (typeof window.Swal !== 'undefined') window.Swal.fire({title:'Expediente incompleto',text:message,icon:'warning',confirmButtonText:'Entendido',confirmButtonColor:'#086374'});
+                        else window.alert(message);
+                    }
+                });
+            });
+            if (closePdfPreviewModalButton) closePdfPreviewModalButton.addEventListener('click', closePdfPreview);
+            if (pdfPreviewModal) {
+                pdfPreviewModal.addEventListener('click', function (event) {
+                    if (event.target === pdfPreviewModal) closePdfPreview();
+                });
+            }
+            document.addEventListener('keydown', function (event) {
+                if (event.key === 'Escape' && pdfPreviewModal && pdfPreviewModal.getAttribute('aria-hidden') === 'false') closePdfPreview();
+            });
+            document.querySelectorAll('[data-sign-pdf]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    if (typeof window.Swal !== 'undefined') {
+                        window.Swal.fire({
+                            title: 'Firma electrónica',
+                            text: 'La integración para firmar el PDF estará disponible próximamente.',
+                            icon: 'info',
+                            confirmButtonText: 'Entendido',
+                            confirmButtonColor: '#086374'
+                        });
+                        return;
+                    }
+                    window.alert('La integración para firmar el PDF estará disponible próximamente.');
+                });
+            });
+            const openModal = function () {
+                if (!createChoiceModal) {
+                    return;
+                }
+                createChoiceModal.style.display = 'flex';
+                createChoiceModal.setAttribute('aria-hidden', 'false');
+                openCreateChoiceBtn.setAttribute('aria-expanded', 'true');
+            };
+
+            const closeModal = function () {
+                if (!createChoiceModal) {
+                    return;
+                }
+                createChoiceModal.style.display = 'none';
+                createChoiceModal.setAttribute('aria-hidden', 'true');
+                openCreateChoiceBtn.setAttribute('aria-expanded', 'false');
+            };
+
+            if (!openCreateChoiceBtn || !createChoiceModal || !createCard) {
+                return;
+            }
+
+            const setVisible = function (visible) {
+                createCard.classList.toggle('is-visible', visible);
+                createCard.style.display = visible ? 'block' : 'none';
+                if (reportsListCard) reportsListCard.style.display = visible ? 'none' : '';
+                if (reportActivitiesCard) reportActivitiesCard.style.display = visible ? 'none' : '';
+            };
+
+            const chooseSource = function (source) {
+                setCreateSource(source);
+                setVisible(true);
+                closeModal();
+                window.location.hash = '#reportForm';
+                if (source === 'MANUAL' && reportPdfManual) {
+                    setTimeout(function () {
+                        reportPdfManual.focus();
+                    }, 50);
+                }
+            };
+
+            if (createCard.classList.contains('is-visible')) {
+                openCreateChoiceBtn.setAttribute('aria-expanded', 'false');
+            }
+
+            openCreateChoiceBtn.addEventListener('click', function (event) {
+                event.preventDefault();
+                openModal();
+            });
+
+            if (cancelButton) {
+                cancelButton.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    setVisible(false);
+                });
+            }
+
+            if (closeCreateChoiceModal) {
+                closeCreateChoiceModal.addEventListener('click', closeModal);
+            }
+
+            choiceCards.forEach(function (card) {
+                card.addEventListener('click', function () {
+                    chooseSource(card.dataset.createSource || 'CONVENIO');
+                });
+            });
+
+            if (createChoiceModal) {
+                createChoiceModal.addEventListener('click', function (event) {
+                    if (event.target === createChoiceModal) {
+                        closeModal();
+                    }
+                });
+            }
+
+            document.addEventListener('keydown', function (event) {
+                if (event.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            if (openCreateChoiceBtn) {
+                openCreateChoiceBtn.setAttribute('aria-expanded', 'false');
+            }
+
+            const manualRowsWrap = document.getElementById('manualFunctionsActivitiesRows');
+            const addManualRowButton = document.getElementById('addManualFunctionActivityRow');
+
+            const updateManualLabels = function () {
+                if (!manualRowsWrap) {
+                    return;
+                }
+                const rows = manualRowsWrap.querySelectorAll('[data-manual-row]');
+                rows.forEach(function (row, idx) {
+                    const labels = row.querySelectorAll('label');
+                    if (labels.length > 0) {
+                        labels[0].textContent = 'Función ' + (idx + 1);
+                    }
+                    if (labels.length > 1) {
+                        labels[1].textContent = 'Actividad de la función ' + (idx + 1);
+                    }
+                });
+            };
+
+            const bindManualRemoveButtons = function () {
+                if (!manualRowsWrap) {
+                    return;
+                }
+                manualRowsWrap.querySelectorAll('[data-remove-manual-row]').forEach(function (button) {
+                    button.onclick = async function () {
+                        const rows = manualRowsWrap.querySelectorAll('[data-manual-row]');
+                        if (rows.length <= 1) {
+                            return;
+                        }
+                        const confirmed = await confirmRemoveManualRow();
+                        if (!confirmed) {
+                            return;
+                        }
+                        const row = button.closest('[data-manual-row]');
+                        if (row) {
+                            row.remove();
+                            updateManualLabels();
+                        }
+                    };
+                });
+            };
+
+            if (manualRowsWrap && addManualRowButton) {
+                addManualRowButton.addEventListener('click', function () {
+                    const current = manualRowsWrap.querySelectorAll('[data-manual-row]').length;
+                    const next = current + 1;
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'field';
+                    wrapper.setAttribute('data-manual-row', '1');
+                    wrapper.innerHTML =
+                        '<div class="manual-row-header">' +
+                        '<div class="field">' +
+                        '<label>Función ' + next + '</label>' +
+                        '<input name="manual_function_titles[]" placeholder="Ej: Función de coordinación territorial">' +
+                        '</div>' +
+                        '<button class="manual-row-remove" type="button" data-remove-manual-row title="Borrar esta función y sus actividades" aria-label="Borrar esta función y sus actividades">×</button>' +
+                        '</div>' +
+                        '<label style="margin-top:8px;">Actividad de la función ' + next + '</label>' +
+                        '<textarea class="activity-textarea" name="manual_activity_texts[]" placeholder="Describe las actividades realizadas para esta función..."></textarea>';
+                    manualRowsWrap.appendChild(wrapper);
+                    bindManualRemoveButtons();
+                    updateManualLabels();
+                });
+                bindManualRemoveButtons();
+                updateManualLabels();
+            }
+        });
+    </script>
+    </body>
 </html>
+
+
+
+
+
+
+
+
+

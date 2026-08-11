@@ -10,6 +10,7 @@ $pdo = db();
 
 $success = '';
 $error = '';
+$showCreateAgreementForm = isset($_POST['create_agreement']) || isset($_POST['create_decree_inline']);
 
 function resolveAgreementStatus(string $startDate, string $endDate): string
 {
@@ -66,6 +67,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $endDate = trim((string) ($_POST['end_date'] ?? ''));
             $installments = trim((string) ($_POST['installments_total'] ?? ''));
             $programItem = trim((string) ($_POST['program_item'] ?? ''));
+            $professionExperience = trim((string) ($_POST['profession_experience'] ?? ''));
+            $supervisionUnit = trim((string) ($_POST['supervision_unit'] ?? ''));
             $decreeId = trim((string) ($_POST['decree_id'] ?? ''));
 
             $functionItems = $_POST['functions_items'] ?? [];
@@ -90,7 +93,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            if ($agreementNumber === '' || $agreementDate === '' || $startDate === '' || $endDate === '' || $programItem === '') {
+            if ($agreementNumber === '' || $agreementDate === '' || $startDate === '' || $endDate === '' || $programItem === '' || $professionExperience === '' || $supervisionUnit === '') {
                 throw new RuntimeException('Completa los campos obligatorios del convenio.');
             }
 
@@ -100,9 +103,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $stmt = $pdo->prepare('INSERT INTO agreements (
                     honorario_user_id, agreement_number, agreement_date, start_date, end_date, installments_total,
-                    program_item, decree_id, pdf_original_name, pdf_path, status, created_by_user_id
+                        program_item, profession_experience, supervision_unit, decree_id, pdf_original_name, pdf_path, status, created_by_user_id
                 ) VALUES (
-                    :uid, :num, :ad, :sd, :ed, :ins, :prog, :decree, :pdfn, :pdfp, :st, :actor
+                        :uid, :num, :ad, :sd, :ed, :ins, :prog, :profession, :supervision, :decree, :pdfn, :pdfp, :st, :actor
                 )
                 ON DUPLICATE KEY UPDATE
                     agreement_date=VALUES(agreement_date),
@@ -110,6 +113,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     end_date=VALUES(end_date),
                     installments_total=VALUES(installments_total),
                     program_item=VALUES(program_item),
+                        profession_experience=VALUES(profession_experience),
+                        supervision_unit=VALUES(supervision_unit),
                     decree_id=VALUES(decree_id),
                     pdf_original_name=VALUES(pdf_original_name),
                     pdf_path=VALUES(pdf_path),
@@ -123,6 +128,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'ed' => $endDate,
                 'ins' => $installments !== '' ? (int) $installments : null,
                 'prog' => $programItem,
+                'profession' => $professionExperience,
+                'supervision' => $supervisionUnit,
                 'decree' => $decreeId !== '' ? (int) $decreeId : null,
                 'pdfn' => $agreementPdf['original_name'] ?? null,
                 'pdfp' => $agreementPdf['stored_path'] ?? null,
@@ -147,6 +154,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $success = 'Convenio guardado correctamente.';
+            $showCreateAgreementForm = false;
         }
 
         if (isset($_POST['update_agreement_functions'])) {
@@ -516,6 +524,9 @@ if (count($agreements) > 0) {
             color: var(--c-error-text);
         }
 
+        .agreement-create-card { display: none; }
+        .agreement-create-card.is-visible { display: block; }
+
         .card {
             background: var(--c-surface);
             border: 1px solid var(--c-border);
@@ -821,7 +832,7 @@ if (count($agreements) > 0) {
                     <nav class="actions">
                         <a class="btn btn-soft" href="dashboard.php">Volver dashboard</a>
                         <a class="btn btn-soft" href="decretos.php">Ver decretos</a>
-                        <a class="btn btn-primary" href="#agregar-convenio">Agregar Convenio</a>
+                        <button class="btn btn-primary" type="button" id="openAgreementForm">Agregar Convenio</button>
                     </nav>
                 </div>
             </header>
@@ -910,7 +921,7 @@ if (count($agreements) > 0) {
             </div>
             </section>
 
-            <section class="card" id="agregar-convenio">
+            <section class="card agreement-create-card<?php echo $showCreateAgreementForm ? ' is-visible' : ''; ?>" id="agregar-convenio">
             <div class="card-head">
                 <h2>Agregar convenio</h2>
             </div>
@@ -944,6 +955,14 @@ if (count($agreements) > 0) {
                         <div class="field">
                             <label>Programa o item</label>
                             <input name="program_item" required placeholder="Ej: Programa de apoyo comunitario">
+                        </div>
+                        <div class="field">
+                            <label>Profesión, oficio y/o experiencia</label>
+                            <input name="profession_experience" required placeholder="Ej: Administrador Público">
+                        </div>
+                        <div class="field">
+                            <label>Dirección o unidad de supervisión</label>
+                            <input name="supervision_unit" required placeholder="Ej: Dirección de Desarrollo Comunitario">
                         </div>
                         <div class="field">
                             <label>N° decreto que lo aprueba</label>
@@ -982,6 +1001,7 @@ if (count($agreements) > 0) {
 
                     <div class="form-footer">
                         <button class="btn btn-primary" type="submit">Guardar convenio</button>
+                        <button class="btn btn-soft" type="button" id="cancelAgreementForm">Cancelar</button>
                     </div>
                 </form>
             </div>
@@ -1115,6 +1135,26 @@ if (count($agreements) > 0) {
             return row;
         }
 
+        const agreementFormCard = document.getElementById('agregar-convenio');
+        const openAgreementFormButton = document.getElementById('openAgreementForm');
+        const cancelAgreementFormButton = document.getElementById('cancelAgreementForm');
+
+        function setAgreementFormVisible(visible) {
+            if (!agreementFormCard) return;
+            agreementFormCard.classList.toggle('is-visible', visible);
+            if (visible) {
+                agreementFormCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                const firstInput = agreementFormCard.querySelector('input:not([type="hidden"])');
+                if (firstInput) setTimeout(() => firstInput.focus(), 350);
+            }
+        }
+
+        if (openAgreementFormButton) {
+            openAgreementFormButton.addEventListener('click', () => setAgreementFormVisible(true));
+        }
+        if (cancelAgreementFormButton) {
+            cancelAgreementFormButton.addEventListener('click', () => setAgreementFormVisible(false));
+        }
         const createModalBg = document.getElementById('createFunctionsModalBg');
         const createRows = document.getElementById('createFunctionsRows');
         const createHidden = document.getElementById('createFunctionsHidden');
