@@ -32,11 +32,14 @@ function firmaGobJwt(string $run): string
         throw new RuntimeException('FirmaGob no está configurado. Faltan FIRMAGOB_SECRET o FIRMAGOB_ENTITY.');
     }
 
+    $chileTime = new DateTimeImmutable('now', new DateTimeZone('America/Santiago'));
+    $expiration = $chileTime->modify('+10 minutes')->format('Y-m-d\TH:i:s');
+
     $header = base64UrlEncode(json_encode(['alg' => 'HS256', 'typ' => 'JWT'], JSON_UNESCAPED_SLASHES));
     $payload = base64UrlEncode(json_encode([
         'entity' => $entity,
         'run' => firmaGobRunBody($run),
-        'expiration' => (new DateTimeImmutable('+10 minutes'))->format('Y-m-d\TH:i:s'),
+        'expiration' => $expiration,
         'purpose' => 'Desatendido',
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     $signature = base64UrlEncode(hash_hmac('sha256', $header . '.' . $payload, $secret, true));
