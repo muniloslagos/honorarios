@@ -32,6 +32,31 @@ function reportFilePath(array $file): string
     return $candidate;
 }
 
+function firmaGobLayoutRectangleFromPost(string $prefix): array
+{
+    $rectangle = [];
+    foreach (['llx', 'lly', 'urx', 'ury'] as $coordinate) {
+        $field = $prefix . '_layout_' . $coordinate;
+        $value = $_POST[$field] ?? null;
+        if ($value === null || !is_numeric($value)) {
+            throw new RuntimeException('No fue posible determinar la posicion de la firma visible.');
+        }
+        $rectangle[$coordinate] = (float) $value;
+    }
+    return $rectangle;
+}
+
+function directorSignatureRoleLines(array $report): array
+{
+    $baseRole = (string) ($report['mailbox_type'] ?? '') === 'DEPARTAMENTO' ? 'Jefe(a)' : 'Director(a)';
+    $directionName = trim((string) ($report['direction_name'] ?? ''));
+    if ((string) ($report['assignment_type'] ?? '') === 'SUBROGANTE') {
+        return [$baseRole . ' Subrogante', $directionName];
+    }
+    $unitName = trim((string) preg_replace('/^(Direcci\x{00F3}n|Departamento)\s+(de\s+)?/iu', '', $directionName));
+    return [$baseRole . ($unitName !== '' ? ' de ' . $unitName : '')];
+}
+
 function directorReport(PDO $pdo, int $reportId, int $profileId): array
 {
     $stmt = $pdo->prepare("SELECT r.*,f.id AS file_id,f.original_name,f.stored_path,f.size_bytes,
@@ -161,11 +186,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $usedFirmaGob = firmaGobIsConfigured();
+            $preparedForFirmaGob = (string) ($_POST['firma_gob_prepared'] ?? '0') === '1';
+            if ($preparedForFirmaGob !== $usedFirmaGob) {
+                throw new RuntimeException('La configuracion de FirmaGob cambio. Recarga la pagina e intenta nuevamente.');
+            }
+            $reportLayout = null;
+            $certificateLayout = null;
+            if ($usedFirmaGob) {
+                $signatureRelativePath = trim((string) ($director['signature_path'] ?? ''));
+                if ($signatureRelativePath === '') {
+                    throw new RuntimeException('El director no tiene una imagen de firma configurada.');
+                }
+                $signatureAbsolutePath = reportFilePath(['stored_path' => $signatureRelativePath]);
+                $signedAt = new DateTimeImmutable('now', new DateTimeZone('America/Santiago'));
+                $stampImage = firmaGobCreateVisibleStamp(
+                    $signatureAbsolutePath,
+                    (string) $director['full_name'],
+                    directorSignatureRoleLines($report),
+                    $signedAt
+                );
+                $reportLayout = firmaGobVisibleLayout($stampImage, firmaGobLayoutRectangleFromPost('report'));
+                $certificateLayout = firmaGobVisibleLayout($stampImage, firmaGobLayoutRectangleFromPost('certificate'));
+            }
             $signedPdf = $usedFirmaGob
-                ? signPdfWithFirmaGob($prepared, (string) $director['run'], 'Informe mensual ' . $report['report_month'] . '/' . $report['report_year'] . ' - ' . $report['honorario_name'])
+                ? signPdfWithFirmaGob($prepared, (string) $director['run'], 'Informe mensual ' . $report['report_month'] . '/' . $report['report_year'] . ' - ' . $report['honorario_name'], $reportLayout)
                 : $prepared;
             $signedCertificate = $usedFirmaGob
-                ? signPdfWithFirmaGob($preparedCertificate, (string) $director['run'], 'Certificado de cumplimiento ' . $report['report_month'] . '/' . $report['report_year'] . ' - ' . $report['honorario_name'])
+                ? signPdfWithFirmaGob($preparedCertificate, (string) $director['run'], 'Certificado de cumplimiento ' . $report['report_month'] . '/' . $report['report_year'] . ' - ' . $report['honorario_name'], $certificateLayout)
                 : $preparedCertificate;
 
             $dir = __DIR__ . '/uploads/reports/director_signed';
@@ -377,10 +424,25 @@ textarea{width:100%;min-height:120px;padding:10px}
     </div>
 </div>
 <form method="post" id="rejectForm" hidden><input type="hidden" name="action" value="reject"><input type="hidden" name="report_id" id="rejectId"><input type="hidden" name="observation" id="rejectObservation"></form>
-<form method="post" enctype="multipart/form-data" id="signForm" hidden><input name="action" value="sign"><input name="report_id" id="signId"><input type="file" name="prepared_pdf" id="preparedPdf"><input type="file" name="prepared_certificate" id="preparedCertificate"></form>
+<form method="post" enctype="multipart/form-data" id="signForm" hidden>
+    <input name="action" value="sign">
+    <input type="hidden" name="firma_gob_prepared" value="<?=$firmaGobConfigured ? '1' : '0'?>">
+    <input name="report_id" id="signId">
+    <input type="file" name="prepared_pdf" id="preparedPdf">
+    <input type="file" name="prepared_certificate" id="preparedCertificate">
+    <input name="report_layout_llx" id="reportLayoutLlx">
+    <input name="report_layout_lly" id="reportLayoutLly">
+    <input name="report_layout_urx" id="reportLayoutUrx">
+    <input name="report_layout_ury" id="reportLayoutUry">
+    <input name="certificate_layout_llx" id="certificateLayoutLlx">
+    <input name="certificate_layout_lly" id="certificateLayoutLly">
+    <input name="certificate_layout_urx" id="certificateLayoutUrx">
+    <input name="certificate_layout_ury" id="certificateLayoutUry">
+</form>
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
 const viewer=document.getElementById('viewer'),frame=document.getElementById('pdfFrame'),viewerFooter=document.getElementById('viewerFooter'),viewerSignButton=document.getElementById('viewerSignButton'),rejectForm=document.getElementById('rejectForm');
+const firmaGobConfigured=<?=json_encode($firmaGobConfigured)?>;
 const closeViewer=()=>{viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');frame.src='';viewerFooter.classList.remove('visible');viewerSignButton.dataset.reportId='';document.body.style.overflow=''};
 const openPdfViewer=(url,reportId='',canSign=false,title='Informe')=>{
  frame.src=url;
@@ -464,7 +526,7 @@ viewerSignButton.onclick=async()=>{
   const stampScale=stampWidth/300;
   const stampOffsetLeft=85,signatureShiftRight=56.7;
   const stampX=page.getWidth()-stampWidth-28-stampOffsetLeft+signatureShiftRight,stampY=90;
-  page.drawImage(image,{x:stampX,y:stampY,width:stampWidth,height:stampHeight});
+  if(!firmaGobConfigured)page.drawImage(image,{x:stampX,y:stampY,width:stampWidth,height:stampHeight});
 
   const textX=stampX+stampWidth*(295/885)+(7*stampScale);
   const maxTextWidth=stampX+stampWidth-textX-(8*stampScale);
@@ -489,12 +551,14 @@ viewerSignButton.onclick=async()=>{
    ? [`${baseRole} Subrogante`,directionName]
    : [`${baseRole}${unitName?` de ${unitName}`:''}`];
 
-  page.drawText(signatureHeading,{x:textX,y:stampY+stampHeight-(21*stampScale),size:fitSize(signatureHeading,font,8.2*stampScale),font});
-  page.drawText(signerName,{x:textX,y:stampY+stampHeight-(36*stampScale),size:fitSize(signerName,boldFont,8.5*stampScale),font:boldFont});
   const dateLine=`Fecha: ${signedAt}`;
-  page.drawText(dateLine,{x:textX,y:stampY+stampHeight-(51*stampScale),size:fitSize(dateLine,font,8.2*stampScale),font});
-  page.drawText(roleLines[0],{x:textX,y:stampY+(25*stampScale),size:fitSize(roleLines[0],font,8.5*stampScale),font});
-  if(roleLines[1])page.drawText(roleLines[1],{x:textX,y:stampY+(12*stampScale),size:fitSize(roleLines[1],font,7.8*stampScale),font});
+  if(!firmaGobConfigured){
+   page.drawText(signatureHeading,{x:textX,y:stampY+stampHeight-(21*stampScale),size:fitSize(signatureHeading,font,8.2*stampScale),font});
+   page.drawText(signerName,{x:textX,y:stampY+stampHeight-(36*stampScale),size:fitSize(signerName,boldFont,8.5*stampScale),font:boldFont});
+   page.drawText(dateLine,{x:textX,y:stampY+stampHeight-(51*stampScale),size:fitSize(dateLine,font,8.2*stampScale),font});
+   page.drawText(roleLines[0],{x:textX,y:stampY+(25*stampScale),size:fitSize(roleLines[0],font,8.5*stampScale),font});
+   if(roleLines[1])page.drawText(roleLines[1],{x:textX,y:stampY+(12*stampScale),size:fitSize(roleLines[1],font,7.8*stampScale),font});
+  }
   const certificateDoc=await PDFLib.PDFDocument.create();
   const certificatePage=certificateDoc.addPage([595.28,841.89]);
   const certificateFont=await certificateDoc.embedFont(PDFLib.StandardFonts.Helvetica);
@@ -520,14 +584,27 @@ viewerSignButton.onclick=async()=>{
   const certificateImage=signatureType.includes('png')?await certificateDoc.embedPng(signatureBytes):await certificateDoc.embedJpg(signatureBytes);
   const certificateStampWidth=240,certificateStampHeight=certificateStampWidth/expectedRatio;
   const certificateStampX=(pageWidth-certificateStampWidth)/2,certificateStampY=72;
-  certificatePage.drawImage(certificateImage,{x:certificateStampX,y:certificateStampY,width:certificateStampWidth,height:certificateStampHeight});
+  if(!firmaGobConfigured)certificatePage.drawImage(certificateImage,{x:certificateStampX,y:certificateStampY,width:certificateStampWidth,height:certificateStampHeight});
   const certScale=certificateStampWidth/300,certTextX=certificateStampX+certificateStampWidth*(295/885)+(7*certScale),certMaxWidth=certificateStampX+certificateStampWidth-certTextX-(8*certScale);
   const certFit=(text,usedFont,preferred,min=5.8)=>{let size=preferred;while(size>min&&usedFont.widthOfTextAtSize(text,size)>certMaxWidth)size-=0.2;return size};
-  certificatePage.drawText(signatureHeading,{x:certTextX,y:certificateStampY+certificateStampHeight-(21*certScale),size:certFit(signatureHeading,certificateFont,8.2*certScale),font:certificateFont});
-  certificatePage.drawText(signerName,{x:certTextX,y:certificateStampY+certificateStampHeight-(36*certScale),size:certFit(signerName,certificateBold,8.5*certScale),font:certificateBold});
-  certificatePage.drawText(dateLine,{x:certTextX,y:certificateStampY+certificateStampHeight-(51*certScale),size:certFit(dateLine,certificateFont,8.2*certScale),font:certificateFont});
-  certificatePage.drawText(roleLines[0],{x:certTextX,y:certificateStampY+(25*certScale),size:certFit(roleLines[0],certificateFont,8.5*certScale),font:certificateFont});
-  if(roleLines[1])certificatePage.drawText(roleLines[1],{x:certTextX,y:certificateStampY+(12*certScale),size:certFit(roleLines[1],certificateFont,7.8*certScale),font:certificateFont});
+  if(!firmaGobConfigured){
+   certificatePage.drawText(signatureHeading,{x:certTextX,y:certificateStampY+certificateStampHeight-(21*certScale),size:certFit(signatureHeading,certificateFont,8.2*certScale),font:certificateFont});
+   certificatePage.drawText(signerName,{x:certTextX,y:certificateStampY+certificateStampHeight-(36*certScale),size:certFit(signerName,certificateBold,8.5*certScale),font:certificateBold});
+   certificatePage.drawText(dateLine,{x:certTextX,y:certificateStampY+certificateStampHeight-(51*certScale),size:certFit(dateLine,certificateFont,8.2*certScale),font:certificateFont});
+   certificatePage.drawText(roleLines[0],{x:certTextX,y:certificateStampY+(25*certScale),size:certFit(roleLines[0],certificateFont,8.5*certScale),font:certificateFont});
+   if(roleLines[1])certificatePage.drawText(roleLines[1],{x:certTextX,y:certificateStampY+(12*certScale),size:certFit(roleLines[1],certificateFont,7.8*certScale),font:certificateFont});
+  }
+  const layoutCoordinates=[
+   ['reportLayoutLlx',Math.max(0,Math.round(stampX))],
+   ['reportLayoutLly',Math.max(0,Math.round(stampY))],
+   ['reportLayoutUrx',Math.min(Math.round(page.getWidth()),Math.round(stampX+stampWidth))],
+   ['reportLayoutUry',Math.min(Math.round(page.getHeight()),Math.round(stampY+stampHeight))],
+   ['certificateLayoutLlx',Math.round(certificateStampX)],
+   ['certificateLayoutLly',Math.round(certificateStampY)],
+   ['certificateLayoutUrx',Math.round(certificateStampX+certificateStampWidth)],
+   ['certificateLayoutUry',Math.round(certificateStampY+certificateStampHeight)]
+  ];
+  layoutCoordinates.forEach(([id,value])=>{document.getElementById(id).value=String(value)});
   const bytes=await pdfDoc.save(),certificateBytes=await certificateDoc.save();
   const file=new File([bytes],'informe_preparado.pdf',{type:'application/pdf'}),certificateFile=new File([certificateBytes],'certificado_preparado.pdf',{type:'application/pdf'});
   const dt=new DataTransfer(),certificateDt=new DataTransfer();dt.items.add(file);certificateDt.items.add(certificateFile);
