@@ -253,6 +253,7 @@ if ($selectedDirection > 0) {
 }
 $reportMonthNames = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 $signatureUrl = (string) ($director['signature_path'] ?? '');
+$firmaGobConfigured = firmaGobIsConfigured();
 $selectedAssignmentType = 'PRINCIPAL';
 $selectedMailboxType = 'DIRECCION';
 $selectedDirectionName = '';
@@ -478,6 +479,7 @@ viewerSignButton.onclick=async()=>{
   }).formatToParts(new Date()).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));
   const signedAt=`${dateParts.day}.${dateParts.month}.${dateParts.year} ${dateParts.hour}:${dateParts.minute}:${dateParts.second}`;
   const signerName=<?=json_encode((string)$director['full_name'])?>.toLocaleUpperCase('es-CL');
+  const signatureHeading=<?=json_encode($firmaGobConfigured ? 'Firmado digitalmente por:' : 'Firmado por:')?>;
   const assignmentType=<?=json_encode($selectedAssignmentType)?>;
   const mailboxType=<?=json_encode($selectedMailboxType)?>;
   const directionName=<?=json_encode($selectedDirectionName)?>;
@@ -487,7 +489,7 @@ viewerSignButton.onclick=async()=>{
    ? [`${baseRole} Subrogante`,directionName]
    : [`${baseRole}${unitName?` de ${unitName}`:''}`];
 
-  page.drawText('Firmado electrónicamente por:',{x:textX,y:stampY+stampHeight-(21*stampScale),size:fitSize('Firmado electrónicamente por:',font,8.2*stampScale),font});
+  page.drawText(signatureHeading,{x:textX,y:stampY+stampHeight-(21*stampScale),size:fitSize(signatureHeading,font,8.2*stampScale),font});
   page.drawText(signerName,{x:textX,y:stampY+stampHeight-(36*stampScale),size:fitSize(signerName,boldFont,8.5*stampScale),font:boldFont});
   const dateLine=`Fecha: ${signedAt}`;
   page.drawText(dateLine,{x:textX,y:stampY+stampHeight-(51*stampScale),size:fitSize(dateLine,font,8.2*stampScale),font});
@@ -521,7 +523,7 @@ viewerSignButton.onclick=async()=>{
   certificatePage.drawImage(certificateImage,{x:certificateStampX,y:certificateStampY,width:certificateStampWidth,height:certificateStampHeight});
   const certScale=certificateStampWidth/300,certTextX=certificateStampX+certificateStampWidth*(295/885)+(7*certScale),certMaxWidth=certificateStampX+certificateStampWidth-certTextX-(8*certScale);
   const certFit=(text,usedFont,preferred,min=5.8)=>{let size=preferred;while(size>min&&usedFont.widthOfTextAtSize(text,size)>certMaxWidth)size-=0.2;return size};
-  certificatePage.drawText('Firmado electrónicamente por:',{x:certTextX,y:certificateStampY+certificateStampHeight-(21*certScale),size:certFit('Firmado electrónicamente por:',certificateFont,8.2*certScale),font:certificateFont});
+  certificatePage.drawText(signatureHeading,{x:certTextX,y:certificateStampY+certificateStampHeight-(21*certScale),size:certFit(signatureHeading,certificateFont,8.2*certScale),font:certificateFont});
   certificatePage.drawText(signerName,{x:certTextX,y:certificateStampY+certificateStampHeight-(36*certScale),size:certFit(signerName,certificateBold,8.5*certScale),font:certificateBold});
   certificatePage.drawText(dateLine,{x:certTextX,y:certificateStampY+certificateStampHeight-(51*certScale),size:certFit(dateLine,certificateFont,8.2*certScale),font:certificateFont});
   certificatePage.drawText(roleLines[0],{x:certTextX,y:certificateStampY+(25*certScale),size:certFit(roleLines[0],certificateFont,8.5*certScale),font:certificateFont});
