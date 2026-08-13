@@ -2870,14 +2870,10 @@ function statusBadge(string $s): string
                                     </div>
                                     <?php endif; ?>
                                     <?php if ($isConvenio && $canCompleteActivities): ?>
-                                    <div class="action-box">
-                                        <h4>1) Completar actividades</h4>
-                                        <p>Abre el formulario superior para cargar las actividades asociadas a este informe.</p>
-                                        <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>&amp;step=2#reportWizard">Continuar informe</a>
-                                    </div>
+                                    <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>&amp;step=2#reportWizard">Continuar informe</a>
                                     <?php endif; ?>
 
-                                    <?php if ($isConvenio): ?>
+                                    <?php if ($isConvenio && ($isFinalizedReport || $isSignedReportPdf || $isPendingEmployeeSignature)): ?>
                                     <div class="action-box">
                                         <?php if ($isFinalizedReport && $uploadedReportPdf !== null): ?>
                                         <h4>Proceso de firmas finalizado</h4>
@@ -2887,24 +2883,15 @@ function statusBadge(string $s): string
                                             <button class="btn btn-ghost btn-sm" type="button" data-print-bundle="<?php echo $reportId; ?>" title="Unir e imprimir expediente" aria-label="Unir e imprimir informe, boleta, certificado, decreto y convenio">🖨</button>
                                         </div>
                                         <?php elseif ($isSignedReportPdf && $uploadedReportPdf !== null): ?>
-                                        <h4>2) Enviado a Firma (Director(a))</h4>
+                                        <h4>Enviado a Firma (Director(a))</h4>
                                         <div class="uploaded-pdf-actions">
                                             <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver informe</button>
                                         </div>
                                         <?php elseif ($isPendingEmployeeSignature && $uploadedReportPdf !== null): ?>
-                                        <h4>2) Enviado a Firma (Funcionario)</h4>
+                                        <h4>Enviado a Firma (Funcionario)</h4>
                                         <div class="uploaded-pdf-actions">
                                             <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $uploadedReportPdf['id']; ?>">Ver informe</button>
                                         </div>
-                                        <?php else: ?>
-                                        <h4>2) Firmar informe</h4>
-                                        <p>Recibirás un enlace en tu correo para revisar y firmar el informe.</p>
-                                        <button
-                                            class="btn btn-sm"
-                                            type="button"
-                                            data-send-signature-report="<?php echo $reportId; ?>"
-                                            data-missing-boleta="<?php echo htmlspecialchars($missingBoletaMessage, ENT_QUOTES, 'UTF-8'); ?>"
-                                        >Firmar</button>
                                         <?php endif; ?>
                                     </div>
                                     <?php endif; ?>
