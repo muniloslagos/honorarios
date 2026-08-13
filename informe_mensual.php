@@ -271,7 +271,7 @@ if ((string) ($_GET['action'] ?? '') === 'view_document_pdf' && $selectedReportI
         (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='CONVENIO_FIRMADO' ORDER BY f.id DESC LIMIT 1) AS manual_agreement_path,
         (SELECT f.stored_path FROM monthly_report_files f WHERE f.report_id=r.id AND f.file_type='DECRETO' ORDER BY f.id DESC LIMIT 1) AS manual_decree_path
         FROM monthly_reports r LEFT JOIN agreements a ON a.id=r.agreement_id LEFT JOIN decrees d ON d.id=a.decree_id
-        WHERE r.id=:id AND r.honorario_user_id=:uid AND r.status IN ('APROBADO','APROBADO_PAGO') LIMIT 1");
+        WHERE r.id=:id AND r.honorario_user_id=:uid LIMIT 1");
     $documentStmt->execute(['id'=>$selectedReportId,'uid'=>$dbUser['id']]);
     $document = $documentStmt->fetch();
     $pathKey = ['REPORT'=>'report_path','CERTIFICATE'=>'certificate_path','BOLETA'=>'boleta_path'][$documentType] ?? '';
@@ -498,7 +498,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $selectedReportId = (int) $pdo->lastInsertId();
 
-                if ($sourceType === 'MANUAL') {
+                if ($sourceType === 'MANUAL' && isset($_POST['legacy_manual_upload'])) {
                     $reportPdf = uploadPdf($_FILES['report_pdf_manual'] ?? [], 'reports');
                     if ($reportPdf === null) {
                         throw new RuntimeException('Debes cargar el PDF del informe para la modalidad manual.');
@@ -928,31 +928,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $date = trim((string) ($_POST['boleta_date'] ?? ''));
             $amountRaw = str_replace(['.', ','], ['', '.'], trim((string) ($_POST['boleta_amount'] ?? '')));
             $amount = $amountRaw !== '' && is_numeric($amountRaw) ? (float) $amountRaw : null;
-            $manualStmt = $pdo->prepare("SELECT id FROM monthly_reports WHERE id=:id AND honorario_user_id=:uid AND source_type='MANUAL' AND status IN ('BORRADOR','RECHAZADO') LIMIT 1");
+            $saveManualProfileRecords = isset($_POST['save_profile_records']);
+            $manualAgreementNumber = trim((string) ($_POST['agreement_number_manual'] ?? ''));
+            $manualAgreementDate = trim((string) ($_POST['agreement_date_manual'] ?? ''));
+            $manualInstallmentsTotal = (int) ($_POST['installments_total_manual'] ?? 0);
+            $manualDecreeDate = trim((string) ($_POST['decree_date_manual'] ?? ''));
+            $manualStmt = $pdo->prepare("SELECT * FROM monthly_reports WHERE id=:id AND honorario_user_id=:uid AND source_type='MANUAL' AND status IN ('BORRADOR','RECHAZADO') LIMIT 1");
             $manualStmt->execute(['id'=>$reportId,'uid'=>$dbUser['id']]);
-            if ($manualStmt->fetchColumn() === false) throw new RuntimeException('El informe manual ya no permite modificar la boleta.');
+            $manualReport = $manualStmt->fetch();
+            if ($manualReport === false) throw new RuntimeException('El informe manual ya no permite modificar sus documentos.');
+            $reportPdf = uploadPdf($_FILES['report_pdf'] ?? [], 'reports/manuales');
+            $agreementPdf = uploadPdf($_FILES['agreement_pdf'] ?? [], 'agreements/' . $dbUser['run']);
+            $decreePdf = uploadPdf($_FILES['decree_pdf'] ?? [], 'decrees/' . $dbUser['run']);
             $boletaPdf = uploadPdf($_FILES['boleta_pdf'] ?? [], 'reports/boletas');
-            $existingBoletaStmt = $pdo->prepare("SELECT EXISTS(SELECT 1 FROM monthly_report_files WHERE report_id=:id AND file_type='BOLETA')");
-            $existingBoletaStmt->execute(['id' => $reportId]);
-            $hasExistingBoleta = (int) $existingBoletaStmt->fetchColumn() === 1;
+            $existingManualFilesStmt = $pdo->prepare("SELECT file_type, COUNT(*) AS total FROM monthly_report_files
+                                                       WHERE report_id=:id AND file_type IN ('RESPALDO','CONVENIO_FIRMADO','DECRETO','BOLETA')
+                                                       GROUP BY file_type");
+            $existingManualFilesStmt->execute(['id' => $reportId]);
+            $existingManualFileTypes = [];
+            foreach ($existingManualFilesStmt->fetchAll() as $existingManualFile) {
+                $existingManualFileTypes[(string) $existingManualFile['file_type']] = (int) $existingManualFile['total'] > 0;
+            }
             if (!$saveManualDraftOnly) {
-                $missingManualBoleta = [];
-                if ($number === '') $missingManualBoleta[] = 'número de boleta';
-                if ($date === '') $missingManualBoleta[] = 'fecha de boleta';
-                if ($amount === null || $amount <= 0) $missingManualBoleta[] = 'valor líquido de la boleta';
-                if ($boletaPdf === null && !$hasExistingBoleta) $missingManualBoleta[] = 'archivo PDF de la boleta';
-                if ($missingManualBoleta !== []) {
-                    throw new RuntimeException('Completa los antecedentes de la boleta: ' . implode(', ', $missingManualBoleta) . '.');
+                $missingManualDocuments = [];
+                if ($number === '') $missingManualDocuments[] = 'número de boleta';
+                if ($date === '') $missingManualDocuments[] = 'fecha de boleta';
+                if ($amount === null || $amount <= 0) $missingManualDocuments[] = 'valor líquido de la boleta';
+                if ($reportPdf === null && !($existingManualFileTypes['RESPALDO'] ?? false)) $missingManualDocuments[] = 'PDF del informe';
+                if ($decreePdf === null && !($existingManualFileTypes['DECRETO'] ?? false)) $missingManualDocuments[] = 'PDF del decreto';
+                if ($agreementPdf === null && !($existingManualFileTypes['CONVENIO_FIRMADO'] ?? false)) $missingManualDocuments[] = 'PDF del convenio';
+                if ($boletaPdf === null && !($existingManualFileTypes['BOLETA'] ?? false)) $missingManualDocuments[] = 'PDF de la boleta';
+                if ($missingManualDocuments !== []) {
+                    throw new RuntimeException('Completa los documentos y antecedentes pendientes: ' . implode(', ', $missingManualDocuments) . '.');
                 }
             }
             $pdo->beginTransaction();
             try {
                 $pdo->prepare('UPDATE monthly_reports SET boleta_number=:number,boleta_date=:date,boleta_amount=:amount WHERE id=:id AND honorario_user_id=:uid')
                     ->execute(['number'=>$number !== '' ? $number : null,'date'=>$date !== '' ? $date : null,'amount'=>$amount,'id'=>$reportId,'uid'=>$dbUser['id']]);
-                if ($boletaPdf !== null) {
-                    $pdo->prepare("DELETE FROM monthly_report_files WHERE report_id=:id AND file_type='BOLETA'")->execute(['id'=>$reportId]);
-                    $pdo->prepare("INSERT INTO monthly_report_files (report_id,file_type,original_name,stored_path,mime_type,size_bytes) VALUES (:id,'BOLETA',:name,:path,'application/pdf',:size)")
-                        ->execute(['id'=>$reportId,'name'=>$boletaPdf['original_name'],'path'=>$boletaPdf['stored_path'],'size'=>(int)($_FILES['boleta_pdf']['size']??0)]);
+                $manualUploads = [
+                    ['file' => $reportPdf, 'type' => 'RESPALDO', 'input' => 'report_pdf'],
+                    ['file' => $decreePdf, 'type' => 'DECRETO', 'input' => 'decree_pdf'],
+                    ['file' => $agreementPdf, 'type' => 'CONVENIO_FIRMADO', 'input' => 'agreement_pdf'],
+                    ['file' => $boletaPdf, 'type' => 'BOLETA', 'input' => 'boleta_pdf'],
+                ];
+                $replaceManualFile = $pdo->prepare("INSERT INTO monthly_report_files (report_id,file_type,original_name,stored_path,mime_type,size_bytes)
+                                                    VALUES (:id,:type,:name,:path,'application/pdf',:size)");
+                foreach ($manualUploads as $manualUpload) {
+                    if ($manualUpload['file'] === null) continue;
+                    $pdo->prepare('DELETE FROM monthly_report_files WHERE report_id=:id AND file_type=:type')
+                        ->execute(['id' => $reportId, 'type' => $manualUpload['type']]);
+                    $replaceManualFile->execute([
+                        'id' => $reportId,
+                        'type' => $manualUpload['type'],
+                        'name' => $manualUpload['file']['original_name'],
+                        'path' => $manualUpload['file']['stored_path'],
+                        'size' => (int) ($_FILES[$manualUpload['input']]['size'] ?? 0),
+                    ]);
+                }
+                if ($saveManualProfileRecords) {
+                    $manualDecreeNumber = trim((string) ($manualReport['decree_number_text'] ?? ''));
+                    if ($manualAgreementNumber === '' || $manualAgreementDate === '' || $manualInstallmentsTotal < 1 || $manualDecreeNumber === '' || $manualDecreeDate === '') {
+                        throw new RuntimeException('Completa número y fecha del convenio, total de cuotas, número y fecha del decreto para guardarlos en tu perfil.');
+                    }
+                    $profileFilesStmt = $pdo->prepare("SELECT file_type, original_name, stored_path FROM monthly_report_files
+                                                       WHERE report_id=:id AND file_type IN ('CONVENIO_FIRMADO','DECRETO')");
+                    $profileFilesStmt->execute(['id' => $reportId]);
+                    $profileFiles = [];
+                    foreach ($profileFilesStmt->fetchAll() as $profileFile) $profileFiles[(string) $profileFile['file_type']] = $profileFile;
+                    if (!isset($profileFiles['CONVENIO_FIRMADO'], $profileFiles['DECRETO'])) {
+                        throw new RuntimeException('Adjunta el convenio y el decreto antes de guardarlos en tu perfil.');
+                    }
+                    $decreeInsert = $pdo->prepare('INSERT INTO decrees (honorario_user_id,decree_number,decree_date,pdf_original_name,pdf_path,created_by_user_id)
+                                                   VALUES (:uid,:number,:date,:name,:path,:actor)
+                                                   ON DUPLICATE KEY UPDATE decree_date=VALUES(decree_date),pdf_original_name=VALUES(pdf_original_name),pdf_path=VALUES(pdf_path)');
+                    $decreeInsert->execute([
+                        'uid' => $dbUser['id'], 'number' => $manualDecreeNumber, 'date' => $manualDecreeDate,
+                        'name' => $profileFiles['DECRETO']['original_name'], 'path' => $profileFiles['DECRETO']['stored_path'], 'actor' => $dbUser['id'],
+                    ]);
+                    $decreeFind = $pdo->prepare('SELECT id FROM decrees WHERE honorario_user_id=:uid AND decree_number=:number LIMIT 1');
+                    $decreeFind->execute(['uid' => $dbUser['id'], 'number' => $manualDecreeNumber]);
+                    $profileDecreeId = (int) $decreeFind->fetchColumn();
+                    $agreementInsert = $pdo->prepare('INSERT INTO agreements (honorario_user_id,agreement_number,agreement_date,start_date,end_date,installments_total,program_item,profession_experience,supervision_unit,decree_id,pdf_original_name,pdf_path,status,created_by_user_id)
+                                                      VALUES (:uid,:number,:date,:start,:end,:installments,:program,:profession,:supervision,:decree,:name,:path,\'VIGENTE\',:actor)
+                                                      ON DUPLICATE KEY UPDATE agreement_date=VALUES(agreement_date),start_date=VALUES(start_date),end_date=VALUES(end_date),installments_total=VALUES(installments_total),program_item=VALUES(program_item),profession_experience=VALUES(profession_experience),supervision_unit=VALUES(supervision_unit),decree_id=VALUES(decree_id),pdf_original_name=VALUES(pdf_original_name),pdf_path=VALUES(pdf_path),status=VALUES(status)');
+                    $agreementInsert->execute([
+                        'uid' => $dbUser['id'], 'number' => $manualAgreementNumber, 'date' => $manualAgreementDate,
+                        'start' => $manualReport['agreement_start_date'], 'end' => $manualReport['agreement_end_date'],
+                        'installments' => $manualInstallmentsTotal, 'program' => $manualReport['program_activity_text'],
+                        'profession' => $manualReport['profession_experience'], 'supervision' => $manualReport['supervision_unit'],
+                        'decree' => $profileDecreeId, 'name' => $profileFiles['CONVENIO_FIRMADO']['original_name'],
+                        'path' => $profileFiles['CONVENIO_FIRMADO']['stored_path'], 'actor' => $dbUser['id'],
+                    ]);
                 }
                 $pdo->commit();
             } catch (Throwable $manualBoletaError) {
@@ -969,7 +1036,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $boletaRequirementStmt = $pdo->prepare("SELECT r.source_type, r.boleta_number, r.boleta_date, r.boleta_amount,
                                                            (SELECT COUNT(*) FROM monthly_report_activities ra WHERE ra.report_id = r.id) AS activities_count,
-                                                           EXISTS(SELECT 1 FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = 'BOLETA') AS has_boleta_pdf
+                                                           EXISTS(SELECT 1 FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = 'BOLETA') AS has_boleta_pdf,
+                                                           EXISTS(SELECT 1 FROM monthly_report_files rf WHERE rf.report_id = r.id AND rf.file_type = 'RESPALDO') AS has_report_pdf,
+                                                           EXISTS(SELECT 1 FROM monthly_report_files df WHERE df.report_id = r.id AND df.file_type = 'DECRETO') AS has_decree_pdf,
+                                                           EXISTS(SELECT 1 FROM monthly_report_files af WHERE af.report_id = r.id AND af.file_type = 'CONVENIO_FIRMADO') AS has_agreement_pdf
                                                     FROM monthly_reports r
                                                     WHERE r.id = :id AND r.honorario_user_id = :uid
                                                     LIMIT 1");
@@ -986,6 +1056,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (trim((string) ($boletaRequirement['boleta_date'] ?? '')) === '') $missingBoletaData[] = 'fecha de boleta';
             if ((float) ($boletaRequirement['boleta_amount'] ?? 0) <= 0) $missingBoletaData[] = 'valor líquido de la boleta';
             if ((int) ($boletaRequirement['has_boleta_pdf'] ?? 0) !== 1) $missingBoletaData[] = 'archivo PDF de la boleta';
+            if ((string) ($boletaRequirement['source_type'] ?? '') === 'MANUAL') {
+                if ((int) ($boletaRequirement['has_report_pdf'] ?? 0) !== 1) $missingBoletaData[] = 'PDF del informe';
+                if ((int) ($boletaRequirement['has_decree_pdf'] ?? 0) !== 1) $missingBoletaData[] = 'PDF del decreto';
+                if ((int) ($boletaRequirement['has_agreement_pdf'] ?? 0) !== 1) $missingBoletaData[] = 'PDF del convenio';
+            }
             if ($missingBoletaData !== []) {
                 throw new RuntimeException('Antes de firmar debes completar: ' . implode(', ', $missingBoletaData) . '. Guarda nuevamente el informe y luego intenta firmar.');
             }
@@ -1262,6 +1337,7 @@ $reportsStmt = $pdo->prepare('SELECT
     r.supervision_unit,
     r.program_activity_text,
     r.decree_number_text,
+    r.decree_date,
     r.agreement_start_date,
     r.agreement_end_date,
     r.installment_number,
@@ -1308,6 +1384,23 @@ if (count($reports) > 0) {
         $reportKey = (int) $boletaFileRow['report_id'];
         if (!isset($boletaFilesByReport[$reportKey])) {
             $boletaFilesByReport[$reportKey] = $boletaFileRow;
+        }
+    }
+}
+$manualDocumentFilesByReport = [];
+if (count($reports) > 0) {
+    $manualDocumentStmt = $pdo->prepare("SELECT f.id, f.report_id, f.file_type, f.original_name, f.stored_path
+                                         FROM monthly_report_files f
+                                         INNER JOIN monthly_reports r ON r.id = f.report_id
+                                         WHERE r.honorario_user_id = :uid
+                                           AND f.file_type IN ('CONVENIO_FIRMADO', 'DECRETO')
+                                         ORDER BY f.id DESC");
+    $manualDocumentStmt->execute(['uid' => $dbUser['id']]);
+    foreach ($manualDocumentStmt->fetchAll() as $manualDocumentRow) {
+        $reportKey = (int) $manualDocumentRow['report_id'];
+        $fileType = (string) $manualDocumentRow['file_type'];
+        if (!isset($manualDocumentFilesByReport[$reportKey][$fileType])) {
+            $manualDocumentFilesByReport[$reportKey][$fileType] = $manualDocumentRow;
         }
     }
 }
@@ -2113,6 +2206,43 @@ function statusBadge(string $s): string
         .source-panel.is-visible {
             display: grid;
         }
+        .manual-profile-option {
+            grid-column: 1 / -1;
+            justify-self: start;
+            width: min(620px, 100%);
+            margin-top: 8px;
+            padding: 14px 16px;
+            border: 1px solid #b8d8e4;
+            border-left: 4px solid var(--primary);
+            border-radius: 12px;
+            background: var(--primary-light);
+        }
+        .manual-profile-option label {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 10px;
+            width: fit-content;
+            color: var(--text);
+            font-size: .94rem;
+            font-weight: 800;
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+        }
+        .manual-profile-option input[type="checkbox"] {
+            flex: 0 0 auto;
+            width: 19px;
+            height: 19px;
+            margin: 0;
+            accent-color: var(--primary);
+            cursor: pointer;
+        }
+        .manual-profile-option .form-footer-note {
+            margin: 7px 0 0 29px;
+            display: block;
+            line-height: 1.4;
+        }
 
         /* ── Table ── */
         .table-wrap { overflow-x: auto; }
@@ -2349,7 +2479,7 @@ function statusBadge(string $s): string
                     </div>
                     <div class="report-wizard-step">
                         <span class="report-wizard-number">2</span>
-                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small>Funciones y respaldo</small></span>
+                        <span class="report-wizard-label"><strong id="createWizardStepTwoTitle">Actividades y boleta</strong><small id="createWizardStepTwoSubtitle">Funciones y respaldo</small></span>
                     </div>
                     <div class="report-wizard-step">
                         <span class="report-wizard-number">3</span>
@@ -2447,7 +2577,7 @@ function statusBadge(string $s): string
                         </div>
                     </div>
 
-                    <div class="source-panel<?php echo $selectedCreateSource === 'MANUAL' ? ' is-visible' : ''; ?>" id="manualPdfPanel">
+                    <div class="source-panel" id="manualPdfPanel" style="display:none;">
                             <div class="field">
                                 <label>PDF del informe</label>
                                 <input type="file" name="report_pdf_manual" id="reportPdfManual" accept="application/pdf">
@@ -2464,12 +2594,12 @@ function statusBadge(string $s): string
                                 <label>PDF de la boleta</label>
                                 <input type="file" name="boleta_pdf_manual" id="boletaPdfManual" accept="application/pdf">
                             </div>
-                            <div class="field" style="padding: 12px 0 0;">
-                                <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.88rem;font-weight:700;color:var(--text);">
+                            <div class="manual-profile-option">
+                                <label>
                                     <input type="checkbox" name="save_profile_records" id="saveProfileRecords">
                                     Guardar convenio y decreto en mi perfil
                                 </label>
-                                <p class="form-footer-note" style="margin:8px 0 0;display:block;">
+                                <p class="form-footer-note">
                                     Si marcas esta opción, el convenio y decreto se almacenarán para reutilizarlos en futuros informes.
                                 </p>
                             </div>
@@ -2523,7 +2653,7 @@ function statusBadge(string $s): string
 
                     <div class="form-footer">
                         <button class="btn btn-ghost" type="button" id="cancelCreateReportBtn">Cancelar</button>
-                        <span class="form-footer-note">
+                        <span class="form-footer-note" id="createReportNextStepNote">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                             El informe se guardará en estado Borrador. La carga de actividades queda para la próxima etapa.
                         </span>
@@ -2622,11 +2752,15 @@ function statusBadge(string $s): string
             $selectedFunctions = $selectedAgreementId > 0 ? ($agreementFunctionsMap[$selectedAgreementId] ?? []) : [];
             $selectedActivities = $activityRows[$selectedReportId] ?? [];
             $selectedBoletaFile = $boletaFilesByReport[$selectedReportId] ?? null;
+            $selectedManualAgreementFile = $manualDocumentFilesByReport[$selectedReportId]['CONVENIO_FIRMADO'] ?? null;
+            $selectedManualDecreeFile = $manualDocumentFilesByReport[$selectedReportId]['DECRETO'] ?? null;
             $selectedMissingBoletaFields = [];
             if (trim((string) ($selectedReport['boleta_number'] ?? '')) === '') $selectedMissingBoletaFields[] = 'número de boleta';
             if (trim((string) ($selectedReport['boleta_date'] ?? '')) === '') $selectedMissingBoletaFields[] = 'fecha de boleta';
             if ((float) ($selectedReport['boleta_amount'] ?? 0) <= 0) $selectedMissingBoletaFields[] = 'valor líquido de la boleta';
             if ($selectedBoletaFile === null) $selectedMissingBoletaFields[] = 'archivo PDF de la boleta';
+            if (!$selectedIsConvenio && $selectedManualAgreementFile === null) $selectedMissingBoletaFields[] = 'archivo PDF del convenio';
+            if (!$selectedIsConvenio && $selectedManualDecreeFile === null) $selectedMissingBoletaFields[] = 'archivo PDF del decreto';
             $selectedMissingBoletaMessage = implode(', ', $selectedMissingBoletaFields);
             $installmentsTotal = $selectedAgreement !== null ? (int) ($selectedAgreement['installments_total'] ?? 0) : 0;
             $selectedReportPdf = $pdfFilesByReport[$selectedReportId] ?? null;
@@ -2637,7 +2771,7 @@ function statusBadge(string $s): string
             );
             $selectedReadyForReview = $selectedActivitiesComplete
                 && $selectedMissingBoletaFields === []
-                && ($selectedIsConvenio || $selectedReportPdf !== null);
+                && ($selectedIsConvenio || ($selectedReportPdf !== null && $selectedManualAgreementFile !== null && $selectedManualDecreeFile !== null));
             $selectedAgreementNumber = $selectedIsConvenio ? (string) ($selectedAgreement['agreement_number'] ?? 'Convenio asociado') : 'Informe manual';
             $wizardStep = max(2, $wizardStep);
         ?>
@@ -2654,7 +2788,7 @@ function statusBadge(string $s): string
                     </div>
                     <a class="report-wizard-step<?php echo $wizardStep === 2 ? ' is-active' : ''; ?><?php echo $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">
                         <span class="report-wizard-number"><?php echo $selectedReadyForReview ? '✓' : '2'; ?></span>
-                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small><?php echo $selectedIsConvenio ? 'Completar antecedentes' : 'Antecedentes de la boleta'; ?></small></span>
+                        <span class="report-wizard-label"><strong><?php echo $selectedIsConvenio ? 'Actividades y boleta' : 'Adjuntar documentos'; ?></strong><small><?php echo $selectedIsConvenio ? 'Completar antecedentes' : 'Informe, decreto, convenio y boleta'; ?></small></span>
                     </a>
                     <a class="report-wizard-step<?php echo $wizardStep === 3 ? ' is-active' : ''; ?><?php echo $wizardStep > 3 && $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=3#reportWizard">
                         <span class="report-wizard-number"><?php echo $wizardStep > 3 && $selectedReadyForReview ? '✓' : '3'; ?></span>
@@ -2746,37 +2880,37 @@ function statusBadge(string $s): string
                     </div>
                 </form>
                 <?php else: ?>
-                <div class="wizard-review-panel" style="margin-bottom:18px;">
-                    <h3>PDF del informe manual</h3>
-                    <?php if ($selectedReportPdf !== null): ?>
-                        <div class="uploaded-pdf-row">
-                            <div class="uploaded-pdf-info">
-                                <span aria-hidden="true">✓</span>
-                                <span class="uploaded-pdf-name"><?php echo htmlspecialchars((string) $selectedReportPdf['original_name'], ENT_QUOTES, 'UTF-8'); ?></span>
-                            </div>
-                            <div class="uploaded-pdf-actions">
-                                <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $selectedReportPdf['id']; ?>">Vista previa</button>
-                                <form method="post" action="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard" class="upload-inline" data-delete-pdf-form>
-                                    <input type="hidden" name="action" value="delete_pdf">
-                                    <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
-                                    <input type="hidden" name="file_id" value="<?php echo (int) $selectedReportPdf['id']; ?>">
-                                    <button class="btn btn-sm btn-delete-pdf" type="submit">Borrar</button>
-                                </form>
-                            </div>
-                        </div>
-                    <?php else: ?>
-                        <p>El PDF fue eliminado. Adjunta el informe corregido para poder continuar.</p>
-                        <form method="post" action="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard" enctype="multipart/form-data" class="upload-inline">
-                            <input type="hidden" name="action" value="upload_pdf">
-                            <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
-                            <input type="file" name="report_pdf" accept="application/pdf" required>
-                            <button class="btn btn-sm" type="submit">Cargar PDF</button>
-                        </form>
-                    <?php endif; ?>
-                </div>
                 <form method="post" enctype="multipart/form-data" id="wizardManualBoletaForm">
                     <input type="hidden" name="action" value="save_manual_boleta">
                     <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+
+                    <p class="form-section-title">Adjuntar documentos</p>
+                    <div class="field-group field-group-4">
+                        <div class="field">
+                            <label>Informe (PDF)</label>
+                            <?php if ($selectedReportPdf !== null): ?><small>Actual: <?php echo htmlspecialchars((string) $selectedReportPdf['original_name'], ENT_QUOTES, 'UTF-8'); ?></small><?php endif; ?>
+                            <input type="file" name="report_pdf" accept="application/pdf">
+                            <small><?php echo $selectedReportPdf !== null ? 'Selecciona otro PDF solo para reemplazarlo.' : 'Documento obligatorio.'; ?></small>
+                        </div>
+                        <div class="field">
+                            <label>Decreto (PDF)</label>
+                            <?php if ($selectedManualDecreeFile !== null): ?><small>Actual: <?php echo htmlspecialchars((string) $selectedManualDecreeFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></small><?php endif; ?>
+                            <input type="file" name="decree_pdf" accept="application/pdf">
+                            <small><?php echo $selectedManualDecreeFile !== null ? 'Selecciona otro PDF solo para reemplazarlo.' : 'Documento obligatorio.'; ?></small>
+                        </div>
+                        <div class="field">
+                            <label>Convenio (PDF)</label>
+                            <?php if ($selectedManualAgreementFile !== null): ?><small>Actual: <?php echo htmlspecialchars((string) $selectedManualAgreementFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></small><?php endif; ?>
+                            <input type="file" name="agreement_pdf" accept="application/pdf">
+                            <small><?php echo $selectedManualAgreementFile !== null ? 'Selecciona otro PDF solo para reemplazarlo.' : 'Documento obligatorio.'; ?></small>
+                        </div>
+                        <div class="field">
+                            <label>Boleta (PDF)</label>
+                            <?php if ($selectedBoletaFile !== null): ?><small>Actual: <?php echo htmlspecialchars((string) $selectedBoletaFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></small><?php endif; ?>
+                            <input type="file" name="boleta_pdf" accept="application/pdf">
+                            <small><?php echo $selectedBoletaFile !== null ? 'Selecciona otro PDF solo para reemplazarlo.' : 'Documento obligatorio.'; ?></small>
+                        </div>
+                    </div>
 
                     <p class="form-section-title">Antecedentes de la boleta</p>
                     <div class="field-group field-group-4">
@@ -2792,17 +2926,21 @@ function statusBadge(string $s): string
                             <label>Valor líquido de la boleta</label>
                             <input type="number" min="1" step="1" name="boleta_amount" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_amount'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: 805125">
                         </div>
-                        <div class="field">
-                            <label>Archivo de la boleta (PDF)</label>
-                            <?php if ($selectedBoletaFile !== null): ?>
-                                <p class="form-footer-note" style="margin:0 0 8px;">Archivo cargado: <?php echo htmlspecialchars((string) $selectedBoletaFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></p>
-                            <?php endif; ?>
-                            <input type="file" name="boleta_pdf" accept="application/pdf">
-                            <small><?php echo $selectedBoletaFile !== null ? 'Selecciona un PDF solo si deseas reemplazar la boleta.' : 'Debe estar adjunto antes de continuar.'; ?></small>
-                        </div>
                     </div>
-                    <div class="options-note" style="margin-top:14px;">
-                        <p><strong>Informe manual.</strong> El PDF del informe ya quedó guardado en la etapa anterior. En esta etapa solo debes completar la boleta.</p>
+                    <div class="manual-profile-option">
+                        <label>
+                            <input type="checkbox" name="save_profile_records" id="saveManualProfileRecordsStep2">
+                            Guardar convenio y decreto en mi perfil
+                        </label>
+                        <p class="form-footer-note">Permite reutilizar estos documentos en futuros informes.</p>
+                    </div>
+                    <div id="manualProfileFieldsStep2" style="display:none;margin-top:14px;">
+                        <div class="field-group field-group-4">
+                            <div class="field"><label>N° convenio</label><input name="agreement_number_manual" placeholder="Ej: CONV-2026-014"></div>
+                            <div class="field"><label>Fecha convenio</label><input type="date" name="agreement_date_manual"></div>
+                            <div class="field"><label>Total de cuotas</label><input type="number" min="1" name="installments_total_manual"></div>
+                            <div class="field"><label>Fecha decreto</label><input type="date" name="decree_date_manual" value="<?php echo htmlspecialchars((string) ($selectedReport['decree_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"></div>
+                        </div>
                     </div>
                     <div class="form-footer" style="align-items:center;">
                         <button class="btn btn-ghost" type="submit" name="wizard_submit" value="save" formnovalidate>Guardar</button>
@@ -2833,6 +2971,8 @@ function statusBadge(string $s): string
                                     <li><span class="wizard-check-icon<?php echo $selectedActivitiesComplete ? '' : ' is-missing'; ?>"><?php echo $selectedActivitiesComplete ? '✓' : '!'; ?></span><span><?php echo $selectedActivitiesComplete ? 'Todas las actividades están completas.' : 'Faltan actividades por completar.'; ?></span></li>
                                 <?php else: ?>
                                     <li><span class="wizard-check-icon<?php echo $selectedReportPdf !== null ? '' : ' is-missing'; ?>"><?php echo $selectedReportPdf !== null ? '✓' : '!'; ?></span><span>Archivo PDF del informe manual.</span></li>
+                                    <li><span class="wizard-check-icon<?php echo $selectedManualDecreeFile !== null ? '' : ' is-missing'; ?>"><?php echo $selectedManualDecreeFile !== null ? '✓' : '!'; ?></span><span>Archivo PDF del decreto.</span></li>
+                                    <li><span class="wizard-check-icon<?php echo $selectedManualAgreementFile !== null ? '' : ' is-missing'; ?>"><?php echo $selectedManualAgreementFile !== null ? '✓' : '!'; ?></span><span>Archivo PDF del convenio.</span></li>
                                 <?php endif; ?>
                                 <?php $selectedHasBoletaIdentity = trim((string) ($selectedReport['boleta_number'] ?? '')) !== '' && trim((string) ($selectedReport['boleta_date'] ?? '')) !== ''; ?>
                                 <li><span class="wizard-check-icon<?php echo $selectedHasBoletaIdentity ? '' : ' is-missing'; ?>"><?php echo $selectedHasBoletaIdentity ? '✓' : '!'; ?></span><span>Número y fecha de la boleta.</span></li>
@@ -2841,13 +2981,23 @@ function statusBadge(string $s): string
                             </ul>
                         </section>
                     </div>
+                    <?php if (!$selectedIsConvenio): ?>
+                    <section class="wizard-review-panel" style="margin-top:18px;">
+                        <h3>Revisar documentos</h3>
+                        <div class="uploaded-pdf-actions" style="justify-content:flex-start;flex-wrap:wrap;">
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=REPORT&amp;report_id=<?php echo (int) $selectedReportId; ?>">Ver informe</button>
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=DECREE&amp;report_id=<?php echo (int) $selectedReportId; ?>">Ver decreto</button>
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=AGREEMENT&amp;report_id=<?php echo (int) $selectedReportId; ?>">Ver convenio</button>
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_document_pdf&amp;type=BOLETA&amp;report_id=<?php echo (int) $selectedReportId; ?>">Ver boleta</button>
+                            <button class="btn" type="button" data-preview-manual-bundle="<?php echo (int) $selectedReportId; ?>">Ver todos agrupados</button>
+                        </div>
+                    </section>
+                    <?php endif; ?>
                     <div class="form-footer">
                         <div style="display:flex;gap:10px;flex-wrap:wrap;">
                             <a class="btn btn-ghost" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Volver</a>
                             <?php if ($selectedIsConvenio): ?>
                                 <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>">Vista previa del informe</button>
-                            <?php elseif ($selectedReportPdf !== null): ?>
-                                <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $selectedReportPdf['id']; ?>">Vista previa del informe</button>
                             <?php endif; ?>
                         </div>
                         <?php if ($selectedReadyForReview): ?>
@@ -3107,6 +3257,9 @@ function statusBadge(string $s): string
         const createChoiceDescription = createChoiceTitle ? createChoiceTitle.nextElementSibling : null;
         const createWizardProgress = document.getElementById('createWizardProgress');
         const createReportButtonText = document.getElementById('createReportButtonText');
+        const createWizardStepTwoTitle = document.getElementById('createWizardStepTwoTitle');
+        const createWizardStepTwoSubtitle = document.getElementById('createWizardStepTwoSubtitle');
+        const createReportNextStepNote = document.getElementById('createReportNextStepNote');
         const manualCreateBoletaFields = document.querySelectorAll('.manual-create-boleta-field');
         const manualPdfPanel = document.getElementById('manualPdfPanel');
         const manualProfileFields = document.getElementById('manualProfileFields');
@@ -3122,6 +3275,8 @@ function statusBadge(string $s): string
         const agreementDateManual = document.getElementById('agreementDateManual');
         const installmentsTotalManual = document.getElementById('installmentsTotalManual');
         const decreeDateManual = document.getElementById('decreeDateManual');
+        const saveManualProfileRecordsStep2 = document.getElementById('saveManualProfileRecordsStep2');
+        const manualProfileFieldsStep2 = document.getElementById('manualProfileFieldsStep2');
         const reportsListCard = document.getElementById('reportsListCard');
         const reportActivitiesCard = document.getElementById('reportActivitiesCard');
 
@@ -3149,9 +3304,9 @@ function statusBadge(string $s): string
             srcConvenio.checked = !isManual;
             agreementWrap.style.display = isManual ? 'none' : 'flex';
             agreementSelect.disabled = isManual;
-            manualPdfPanel.classList.toggle('is-visible', isManual);
-            manualPdfPanel.style.display = isManual ? 'grid' : 'none';
-            reportPdfManual.required = isManual;
+            manualPdfPanel.classList.remove('is-visible');
+            manualPdfPanel.style.display = 'none';
+            reportPdfManual.required = false;
             if (boletaNumberInput) boletaNumberInput.required = false;
             if (boletaDateInput) boletaDateInput.required = false;
             if (installmentInput) installmentInput.required = !isManual;
@@ -3163,6 +3318,13 @@ function statusBadge(string $s): string
             }
             if (createWizardProgress) createWizardProgress.style.display = 'grid';
             if (createReportButtonText) createReportButtonText.textContent = 'Guardar y continuar';
+            if (createWizardStepTwoTitle) createWizardStepTwoTitle.textContent = isManual ? 'Adjuntar documentos' : 'Actividades y boleta';
+            if (createWizardStepTwoSubtitle) createWizardStepTwoSubtitle.textContent = isManual ? 'Informe, decreto, convenio y boleta' : 'Funciones y respaldo';
+            if (createReportNextStepNote) {
+                createReportNextStepNote.lastChild.textContent = isManual
+                    ? ' El informe se guardará como borrador. Los cuatro documentos se adjuntan en la etapa siguiente.'
+                    : ' El informe se guardará como borrador. Las actividades se completan en la etapa siguiente.';
+            }
             manualCreateBoletaFields.forEach(function (field) {
                 field.style.display = 'none';
             });
@@ -3200,6 +3362,14 @@ function statusBadge(string $s): string
         agreementSelect.addEventListener('change', applyAgreementData);
         if (saveProfileRecords) {
             saveProfileRecords.addEventListener('change', toggleManualProfileFields);
+        }
+        if (saveManualProfileRecordsStep2 && manualProfileFieldsStep2) {
+            saveManualProfileRecordsStep2.addEventListener('change', function () {
+                manualProfileFieldsStep2.style.display = saveManualProfileRecordsStep2.checked ? 'block' : 'none';
+                manualProfileFieldsStep2.querySelectorAll('input[name]').forEach(function (input) {
+                    input.required = saveManualProfileRecordsStep2.checked;
+                });
+            });
         }
         toggleSource();
         toggleManualProfileFields();
@@ -3307,6 +3477,54 @@ function statusBadge(string $s): string
                     pdfPreviewModal.style.display = 'flex';
                     pdfPreviewModal.setAttribute('aria-hidden', 'false');
                     document.body.style.overflow = 'hidden';
+                });
+            });
+
+            let manualBundleObjectUrl = '';
+            document.querySelectorAll('[data-preview-manual-bundle]').forEach(function (button) {
+                button.addEventListener('click', async function () {
+                    const reportId = button.dataset.previewManualBundle || '';
+                    if (!reportId || !pdfPreviewModal || !pdfPreviewFrame || typeof window.PDFLib === 'undefined') return;
+                    const manualDocuments = ['REPORT', 'DECREE', 'AGREEMENT', 'BOLETA'];
+                    if (typeof window.Swal !== 'undefined') {
+                        window.Swal.fire({
+                            title: 'Agrupando documentos',
+                            text: 'Preparando informe, decreto, convenio y boleta.',
+                            allowOutsideClick: false,
+                            allowEscapeKey: false,
+                            showConfirmButton: false,
+                            didOpen: function () { window.Swal.showLoading(); }
+                        });
+                    }
+                    try {
+                        const responses = await Promise.all(manualDocuments.map(function (type) {
+                            return fetch('informe_mensual.php?action=view_document_pdf&report_id=' + encodeURIComponent(reportId) + '&type=' + type);
+                        }));
+                        if (responses.some(function (response) { return !response.ok; })) {
+                            throw new Error('No fue posible cargar todos los documentos.');
+                        }
+                        const mergedPdf = await PDFLib.PDFDocument.create();
+                        for (const response of responses) {
+                            const sourcePdf = await PDFLib.PDFDocument.load(await response.arrayBuffer());
+                            const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
+                            copiedPages.forEach(function (page) { mergedPdf.addPage(page); });
+                        }
+                        const mergedBytes = await mergedPdf.save();
+                        if (manualBundleObjectUrl) URL.revokeObjectURL(manualBundleObjectUrl);
+                        manualBundleObjectUrl = URL.createObjectURL(new Blob([mergedBytes], {type: 'application/pdf'}));
+                        pdfPreviewFrame.src = manualBundleObjectUrl;
+                        if (pdfPreviewFooter) pdfPreviewFooter.classList.remove('is-visible');
+                        pdfPreviewModal.style.display = 'flex';
+                        pdfPreviewModal.setAttribute('aria-hidden', 'false');
+                        document.body.style.overflow = 'hidden';
+                        if (typeof window.Swal !== 'undefined') window.Swal.close();
+                    } catch (error) {
+                        if (typeof window.Swal !== 'undefined') {
+                            window.Swal.fire({title:'No fue posible agrupar',text:error.message || 'Revisa los documentos adjuntos.',icon:'error',confirmButtonText:'Entendido'});
+                        } else {
+                            window.alert(error.message || 'No fue posible agrupar los documentos.');
+                        }
+                    }
                 });
             });
 
