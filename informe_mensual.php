@@ -23,6 +23,10 @@ $error = '';
 $showCreateForm = false;
 $selectedCreateSource = 'CONVENIO';
 $selectedReportId = (int) ($_GET['report_id'] ?? 0);
+$wizardStep = max(1, min(4, (int) ($_GET['step'] ?? 2)));
+if ((string) ($_GET['notice'] ?? '') === 'activities_saved') {
+    $success = 'Actividades y antecedentes de la boleta guardados correctamente.';
+}
 
 function pdfEscape(string $text): string
 {
@@ -400,6 +404,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $endDate = trim((string) ($agreementRow['end_date'] ?? $endDate));
 
                 $maxInstallments = isset($agreementRow['installments_total']) ? (int) $agreementRow['installments_total'] : null;
+                if ($installment === null || $installment < 1) {
+                    throw new RuntimeException('Debes seleccionar el número de cuota del informe.');
+                }
                 if ($maxInstallments !== null && $maxInstallments > 0) {
                     if ($installment === null || $installment < 1 || $installment > $maxInstallments) {
                         throw new RuntimeException('Debes seleccionar una cuota valida para el convenio.');
@@ -621,7 +628,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             if ($sourceType === 'CONVENIO') {
-                redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '#reportActivitiesCard');
+                redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=2#reportWizard');
             }
             $success = 'Informe manual creado correctamente.';
         } elseif ($action === 'save_activities') {
@@ -631,6 +638,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                 r.provider_name, r.profession_experience, r.supervision_unit, r.program_activity_text,
                                                 r.decree_number_text, r.agreement_start_date, r.agreement_end_date, r.installment_number,
                                                 r.boleta_number, r.boleta_date, r.director_signed_at,
+                                                EXISTS(SELECT 1 FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = \'BOLETA\') AS has_boleta_pdf,
                                                 EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_id = r.id AND sr.status = \'PENDIENTE\') AS has_pending_signature,
                                                 EXISTS(SELECT 1 FROM signature_requests sr WHERE sr.report_id = r.id AND sr.status = \'FIRMADO\') AS has_employee_signature
                                          FROM monthly_reports r
@@ -694,10 +702,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $finalStart = trim((string) ($agreementRow['start_date'] ?? $finalStart));
                 $finalEnd = trim((string) ($agreementRow['end_date'] ?? $finalEnd));
                 $maxInstallments = isset($agreementRow['installments_total']) ? (int) $agreementRow['installments_total'] : null;
+                if ($finalInstallment === null || $finalInstallment < 1) {
+                    throw new RuntimeException('Debes indicar una cuota válida para el convenio.');
+                }
                 if ($maxInstallments !== null && $maxInstallments > 0) {
                     if ($finalInstallment === null || $finalInstallment < 1 || $finalInstallment > $maxInstallments) {
                         throw new RuntimeException('Debes indicar una cuota valida para el convenio.');
                     }
+                }
+                $missingStepTwoData = [];
+                if ($finalBoletaNumber === '') $missingStepTwoData[] = 'número de boleta';
+                if ($finalBoletaDate === '') $missingStepTwoData[] = 'fecha de boleta';
+                if ($finalBoletaAmount === null || $finalBoletaAmount <= 0) $missingStepTwoData[] = 'valor líquido de la boleta';
+                if ($missingStepTwoData !== []) {
+                    throw new RuntimeException('Completa los antecedentes de la boleta: ' . implode(', ', $missingStepTwoData) . '.');
                 }
             } elseif ($sourceType === 'MANUAL') {
                 if ($finalProfession === '' || $finalProgram === '' || $finalSupervision === '' || $finalDecree === '' || $finalStart === '' || $finalEnd === '') {
@@ -709,6 +727,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $newBoletaAbsolutePath = $boletaPdf !== null
                 ? __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $boletaPdf['stored_path'])
                 : '';
+            if ($sourceType === 'CONVENIO' && $boletaPdf === null && (int) ($reportRow['has_boleta_pdf'] ?? 0) !== 1) {
+                throw new RuntimeException('Debes adjuntar el archivo PDF de la boleta para continuar.');
+            }
             $previousBoletaPaths = [];
             $pdo->beginTransaction();
             try {
@@ -852,7 +873,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $selectedReportId = $reportId;
-            $success = 'Actividades del informe guardadas correctamente.';
+            redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=3&notice=activities_saved#reportWizard');
         } elseif ($action === 'generate_convenio_pdf') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
             prepareConvenioReportPdf($pdo, $reportId, (int) $dbUser['id']);
@@ -919,6 +940,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $fileId = (int) ($_POST['file_id'] ?? 0);
 
             $boletaRequirementStmt = $pdo->prepare("SELECT r.source_type, r.boleta_number, r.boleta_date, r.boleta_amount,
+                                                           (SELECT COUNT(*) FROM monthly_report_activities ra WHERE ra.report_id = r.id) AS activities_count,
                                                            EXISTS(SELECT 1 FROM monthly_report_files bf WHERE bf.report_id = r.id AND bf.file_type = 'BOLETA') AS has_boleta_pdf
                                                     FROM monthly_reports r
                                                     WHERE r.id = :id AND r.honorario_user_id = :uid
@@ -927,6 +949,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $boletaRequirement = $boletaRequirementStmt->fetch();
             if ($boletaRequirement === false) {
                 throw new RuntimeException('Informe no encontrado para enviar a firma.');
+            }
+            if ((string) ($boletaRequirement['source_type'] ?? '') === 'CONVENIO' && (int) ($boletaRequirement['activities_count'] ?? 0) < 1) {
+                throw new RuntimeException('Debes completar las actividades del informe antes de enviarlo a firma.');
             }
             $missingBoletaData = [];
             if (trim((string) ($boletaRequirement['boleta_number'] ?? '')) === '') $missingBoletaData[] = 'número de boleta';
@@ -1013,6 +1038,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $pdo->prepare('UPDATE signature_requests SET sent_at = NOW() WHERE id = :id')->execute(['id' => $requestId]);
             $success = 'Enlace seguro de firma enviado a ' . $recipientEmail . '.';
+            $selectedReportId = 0;
         } elseif ($action === 'delete_report') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
             if ($reportId < 1) {
@@ -1182,6 +1208,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'create_report') {
             $showCreateForm = true;
             $selectedCreateSource = $sourceType ?? $selectedCreateSource;
+        } elseif ($action === 'save_activities') {
+            $wizardStep = 2;
+        } elseif ($action === 'send_signature_request') {
+            $wizardStep = 4;
         }
     }
 }
@@ -1756,6 +1786,158 @@ function statusBadge(string $s): string
             color: var(--text-muted);
             text-align: center;
         }
+        .report-wizard-progress {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+        .report-wizard-step {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            min-height: 58px;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: #f8fafc;
+            color: var(--text-muted);
+            text-decoration: none;
+        }
+        .report-wizard-step.is-active {
+            border-color: #8fc4d3;
+            background: var(--primary-light);
+            color: var(--primary-hover);
+            box-shadow: inset 0 0 0 1px rgba(8, 99, 116, .08);
+        }
+        .report-wizard-step.is-complete {
+            border-color: #b9dec9;
+            background: #f0fdf4;
+            color: #166534;
+        }
+        .report-wizard-step.is-active {
+            border-color: #8fc4d3;
+            background: var(--primary-light);
+            color: var(--primary-hover);
+        }
+        .report-wizard-number {
+            display: grid;
+            place-items: center;
+            flex: 0 0 auto;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #dbe5ec;
+            color: #40576a;
+            font-size: .78rem;
+            font-weight: 800;
+        }
+        .is-active .report-wizard-number {
+            background: var(--primary);
+            color: #fff;
+        }
+        .is-complete .report-wizard-number {
+            background: #15803d;
+            color: #fff;
+        }
+        .report-wizard-label strong,
+        .report-wizard-label small { display: block; }
+        .report-wizard-label strong {
+            font-size: .82rem;
+            line-height: 1.2;
+        }
+        .report-wizard-label small {
+            margin-top: 3px;
+            font-size: .7rem;
+            line-height: 1.2;
+            color: inherit;
+            opacity: .82;
+        }
+        .wizard-summary {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .wizard-summary-item {
+            padding: 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: #f8fafc;
+        }
+        .wizard-summary-item span,
+        .wizard-summary-item strong { display: block; }
+        .wizard-summary-item span {
+            margin-bottom: 4px;
+            color: var(--text-muted);
+            font-size: .72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+        .wizard-summary-item strong {
+            color: var(--text);
+            font-size: .88rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .wizard-review-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr);
+            gap: 18px;
+        }
+        .wizard-review-panel {
+            padding: 18px;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: #fff;
+        }
+        .wizard-review-panel h3 { margin: 0 0 12px; font-size: 1rem; }
+        .wizard-check-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+        .wizard-check-list li {
+            display: flex;
+            align-items: flex-start;
+            gap: 9px;
+            color: var(--text);
+            font-size: .88rem;
+        }
+        .wizard-check-icon {
+            display: grid;
+            place-items: center;
+            flex: 0 0 auto;
+            width: 21px;
+            height: 21px;
+            border-radius: 50%;
+            background: #dcfce7;
+            color: #166534;
+            font-size: .72rem;
+            font-weight: 900;
+        }
+        .wizard-check-icon.is-missing { background: #fee2e2; color: #b42318; }
+        .wizard-sign-panel {
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 26px;
+            border: 1px solid #b8d8e4;
+            border-radius: 16px;
+            background: linear-gradient(145deg, #f7fcfd, #eef8fb);
+            text-align: center;
+        }
+        .wizard-sign-panel h3 { margin: 0 0 8px; color: var(--text); }
+        .wizard-sign-panel p { margin: 0 0 18px; color: var(--text-muted); line-height: 1.5; }
+        .manual-create-boleta-field { display: none; }
+        @media (max-width: 900px) {
+            .report-wizard-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .wizard-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .wizard-review-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 560px) {
+            .report-wizard-progress,
+            .wizard-summary { grid-template-columns: 1fr; }
+            .report-wizard-label small { display: none; }
+            .report-wizard-step { min-height: 48px; }
+        }
 
         /* ── Form ── */
         .field-group {
@@ -2132,6 +2314,24 @@ function statusBadge(string $s): string
                 <span class="create-source-pill" id="createSourcePill">Modalidad: <?php echo $selectedCreateSource === 'MANUAL' ? 'Manual con PDF' : 'Convenio almacenado'; ?></span>
             </div>
             <div class="card-body">
+                <div class="report-wizard-progress" id="createWizardProgress"<?php echo $selectedCreateSource === 'MANUAL' ? ' style="display:none;"' : ''; ?>>
+                    <div class="report-wizard-step is-active">
+                        <span class="report-wizard-number">1</span>
+                        <span class="report-wizard-label"><strong>Datos del informe</strong><small>Periodo y convenio</small></span>
+                    </div>
+                    <div class="report-wizard-step">
+                        <span class="report-wizard-number">2</span>
+                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small>Funciones y respaldo</small></span>
+                    </div>
+                    <div class="report-wizard-step">
+                        <span class="report-wizard-number">3</span>
+                        <span class="report-wizard-label"><strong>Revisión</strong><small>Validación y vista previa</small></span>
+                    </div>
+                    <div class="report-wizard-step">
+                        <span class="report-wizard-number">4</span>
+                        <span class="report-wizard-label"><strong>Firmar y enviar</strong><small>Envío al director</small></span>
+                    </div>
+                </div>
                 <form method="post" enctype="multipart/form-data" id="reportForm">
                     <input type="hidden" name="action" value="create_report">
 
@@ -2180,7 +2380,7 @@ function statusBadge(string $s): string
                             <label>Convenio</label>
                             <select name="agreement_id" id="agreementSelect">
                                 <option value="">— Seleccionar —</option>
-                                <?php foreach ($agreements as $a): ?>
+                                <?php foreach ($activeAgreements as $a): ?>
                                     <option
                                         value="<?php echo (int) $a['id']; ?>"
                                         data-program="<?php echo htmlspecialchars((string) $a['program_item'], ENT_QUOTES, 'UTF-8'); ?>"
@@ -2205,15 +2405,15 @@ function statusBadge(string $s): string
                             <label>N° cuota (si aplica)</label>
                             <input type="number" min="1" name="installment_number" id="installmentInput" placeholder="Ej: 3">
                         </div>
-                        <div class="field">
+                        <div class="field manual-create-boleta-field">
                             <label>N° boleta</label>
                             <input name="boleta_number" id="boletaNumberInput" placeholder="Ej: BOL-2026-041">
                         </div>
-                        <div class="field">
+                        <div class="field manual-create-boleta-field">
                             <label>Fecha de boleta</label>
                             <input type="date" name="boleta_date" id="boletaDateInput">
                         </div>
-                        <div class="field">
+                        <div class="field manual-create-boleta-field">
                             <label>Valor líquido de la boleta</label>
                             <input type="number" min="0" step="1" name="boleta_amount" id="boletaAmountInput" placeholder="Ej: 805125">
                         </div>
@@ -2297,7 +2497,7 @@ function statusBadge(string $s): string
                         <div style="display:flex; gap:10px; flex-wrap:wrap;">
                             <button class="btn" type="submit">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
-                                Crear informe
+                                <span id="createReportButtonText"><?php echo $selectedCreateSource === 'MANUAL' ? 'Crear informe' : 'Guardar y continuar'; ?></span>
                             </button>
                             <button class="btn btn-ghost" type="button" id="cancelCreateReportBtn">Cancelar</button>
                         </div>
@@ -2402,97 +2602,91 @@ function statusBadge(string $s): string
             if ((float) ($selectedReport['boleta_amount'] ?? 0) <= 0) $selectedMissingBoletaFields[] = 'valor líquido de la boleta';
             if ($selectedBoletaFile === null) $selectedMissingBoletaFields[] = 'archivo PDF de la boleta';
             $selectedMissingBoletaMessage = implode(', ', $selectedMissingBoletaFields);
-            $isSelectedConvenio = (string) $selectedReport['source_type'] === 'CONVENIO';
             $installmentsTotal = $selectedAgreement !== null ? (int) ($selectedAgreement['installments_total'] ?? 0) : 0;
+            $selectedActivitiesComplete = count($selectedFunctions) > 0 && count($selectedActivities) === count($selectedFunctions);
+            $selectedReadyForReview = $selectedActivitiesComplete && $selectedMissingBoletaFields === [];
+            $selectedAgreementNumber = (string) ($selectedAgreement['agreement_number'] ?? 'Convenio asociado');
+            $wizardStep = max(2, $wizardStep);
         ?>
-        <div class="card report-activity-card" id="reportActivitiesCard">
+        <div class="card report-activity-card" id="reportWizard">
             <div class="card-header">
-                <h2><span class="step">2</span> Completar actividades del informe</h2>
-                <a class="btn btn-ghost btn-sm" href="#reportForm">Volver a crear</a>
+                <h2>Preparar informe por convenio</h2>
+                <a class="btn btn-ghost btn-sm" href="informe_mensual.php" title="Puedes continuar la edición después">Cerrar</a>
             </div>
             <div class="card-body">
-                <form method="post" enctype="multipart/form-data">
+                <div class="report-wizard-progress" aria-label="Progreso del informe">
+                    <div class="report-wizard-step is-complete<?php echo $wizardStep === 1 ? ' is-active' : ''; ?>">
+                        <span class="report-wizard-number">✓</span>
+                        <span class="report-wizard-label"><strong>Datos del informe</strong><small>Guardados</small></span>
+                    </div>
+                    <a class="report-wizard-step<?php echo $wizardStep === 2 ? ' is-active' : ''; ?><?php echo $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">
+                        <span class="report-wizard-number"><?php echo $selectedReadyForReview ? '✓' : '2'; ?></span>
+                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small>Completar antecedentes</small></span>
+                    </a>
+                    <a class="report-wizard-step<?php echo $wizardStep === 3 ? ' is-active' : ''; ?><?php echo $wizardStep > 3 && $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=3#reportWizard">
+                        <span class="report-wizard-number"><?php echo $wizardStep > 3 && $selectedReadyForReview ? '✓' : '3'; ?></span>
+                        <span class="report-wizard-label"><strong>Revisión</strong><small>Validar y visualizar</small></span>
+                    </a>
+                    <a class="report-wizard-step<?php echo $wizardStep === 4 ? ' is-active' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=4#reportWizard">
+                        <span class="report-wizard-number">4</span>
+                        <span class="report-wizard-label"><strong>Firmar y enviar</strong><small>Enviar enlace de firma</small></span>
+                    </a>
+                </div>
+
+                <?php if ($wizardStep === 2): ?>
+                <div class="wizard-summary">
+                    <div class="wizard-summary-item"><span>Periodo</span><strong><?php echo htmlspecialchars(($monthNames[(int) $selectedReport['report_month']] ?? '') . ' de ' . (string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                    <div class="wizard-summary-item"><span>Dirección</span><strong><?php echo htmlspecialchars((string) $selectedReport['supervision_unit'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                    <div class="wizard-summary-item"><span>Convenio</span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                    <div class="wizard-summary-item"><span>Cuota</span><strong>N.º <?php echo (int) ($selectedReport['installment_number'] ?? 0); ?></strong></div>
+                </div>
+
+                <form method="post" enctype="multipart/form-data" id="wizardActivitiesForm">
                     <input type="hidden" name="action" value="save_activities">
                     <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+                    <input type="hidden" name="profession_experience" value="<?php echo htmlspecialchars((string) ($selectedReport['profession_experience'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="program_activity_text" value="<?php echo htmlspecialchars((string) ($selectedReport['program_activity_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="decree_number_text" value="<?php echo htmlspecialchars((string) ($selectedReport['decree_number_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="agreement_start_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_start_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="agreement_end_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_end_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                    <?php if ((int) ($selectedReport['installment_number'] ?? 0) > 0): ?>
+                        <input type="hidden" name="installment_number" value="<?php echo (int) $selectedReport['installment_number']; ?>">
+                    <?php else: ?>
+                        <div class="field" style="max-width:260px;margin-bottom:18px;">
+                            <label>N.º de cuota pendiente</label>
+                            <select name="installment_number" required>
+                                <option value="">Seleccionar</option>
+                                <?php for ($i = 1; $i <= max(1, $installmentsTotal); $i++): ?><option value="<?php echo $i; ?>"><?php echo $i; ?></option><?php endfor; ?>
+                            </select>
+                        </div>
+                    <?php endif; ?>
 
-                    <p class="form-section-title">Datos del informe</p>
+                    <p class="form-section-title">Antecedentes de la boleta</p>
                     <div class="field-group field-group-4">
                         <div class="field">
-                            <label>Mes</label>
-                            <input value="<?php echo htmlspecialchars($monthNames[(int) $selectedReport['report_month']] ?? (string) $selectedReport['report_month'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
-                        </div>
-                        <div class="field">
-                            <label>Año</label>
-                            <input value="<?php echo htmlspecialchars((string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
-                        </div>
-                        <div class="field col-span-2">
-                            <label>Nombre del prestador del servicio</label>
-                            <input name="provider_name" value="<?php echo htmlspecialchars((string) $selectedReport['provider_name'], ENT_QUOTES, 'UTF-8'); ?>" readonly>
-                        </div>
-                        <div class="field">
-                            <label>Profesión, oficio y/o experiencia</label>
-                            <input name="profession_experience" value="<?php echo htmlspecialchars((string) ($selectedReport['profession_experience'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
-                        </div>
-                        <div class="field">
-                            <label>Dirección o unidad de supervisión</label>
-                            <input name="supervision_unit" value="<?php echo htmlspecialchars($configuredDirectionName !== '' ? $configuredDirectionName : (string) ($selectedReport['supervision_unit'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" readonly>
-                        </div>
-                        <div class="field col-span-2">
-                            <label>Programa, Convenio y/o Actividad</label>
-                            <textarea name="program_activity_text" class="activity-textarea" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>><?php echo htmlspecialchars((string) ($selectedReport['program_activity_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></textarea>
-                        </div>
-                        <div class="field">
-                            <label>N° Decreto que aprueba el convenio</label>
-                            <input name="decree_number_text" value="<?php echo htmlspecialchars((string) ($selectedReport['decree_number_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
-                        </div>
-                        <div class="field">
-                            <label>Vigencia inicio</label>
-                            <input type="date" name="agreement_start_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_start_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
-                        </div>
-                        <div class="field">
-                            <label>Vigencia fin</label>
-                            <input type="date" name="agreement_end_date" value="<?php echo htmlspecialchars((string) ($selectedReport['agreement_end_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" <?php echo $isSelectedConvenio ? 'readonly' : ''; ?>>
-                        </div>
-                        <div class="field">
-                            <label>N° de cuota</label>
-                            <?php if ($isSelectedConvenio && $installmentsTotal > 0): ?>
-                                <select name="installment_number">
-                                    <?php for ($i = 1; $i <= $installmentsTotal; $i++): ?>
-                                        <option value="<?php echo $i; ?>" <?php echo (int) ($selectedReport['installment_number'] ?? 0) === $i ? 'selected' : ''; ?>><?php echo $i; ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            <?php else: ?>
-                                <input type="number" min="1" name="installment_number" value="<?php echo htmlspecialchars((string) ($selectedReport['installment_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
-                            <?php endif; ?>
-                        </div>
-                        <div class="field">
                             <label>N° boleta</label>
-                            <input name="boleta_number" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                            <input name="boleta_number" required value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
                         </div>
                         <div class="field">
                             <label>Fecha de boleta</label>
-                            <input type="date" name="boleta_date" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                            <input type="date" name="boleta_date" required value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
                         </div>
                         <div class="field">
                             <label>Valor líquido de la boleta</label>
-                            <input type="number" min="0" step="1" name="boleta_amount" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_amount'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: 805125">
+                            <input type="number" min="1" step="1" name="boleta_amount" required value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_amount'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: 805125">
                         </div>
-                        <div class="field col-span-2">
+                        <div class="field">
                             <label>Archivo de la boleta (PDF)</label>
                             <?php if ($selectedBoletaFile !== null): ?>
                                 <p class="form-footer-note" style="margin:0 0 8px;">Archivo cargado: <?php echo htmlspecialchars((string) $selectedBoletaFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></p>
                             <?php endif; ?>
-                            <input type="file" name="boleta_pdf" accept="application/pdf">
+                            <input type="file" name="boleta_pdf" accept="application/pdf" <?php echo $selectedBoletaFile === null ? 'required' : ''; ?>>
                             <small><?php echo $selectedBoletaFile !== null ? 'Selecciona un PDF solo si deseas reemplazar la boleta.' : 'Debe estar adjunto antes de enviar el informe a firma.'; ?></small>
                         </div>
                     </div>
 
-                    <div class="options-note" style="margin-top:14px;">
-                        <p><strong>Antecedentes de la boleta.</strong> Puedes guardar el informe sin estos datos, pero el número, la fecha, el valor líquido y el archivo PDF serán obligatorios antes de firmarlo.</p>
-                    </div>
-
-                    <p class="form-section-title">Actividades</p>
-                    <?php if ($isSelectedConvenio && count($selectedFunctions) > 0): ?>
+                    <p class="form-section-title">Funciones y actividades realizadas</p>
+                    <?php if (count($selectedFunctions) > 0): ?>
                         <div class="activity-field-stack">
                             <?php foreach ($selectedFunctions as $index => $fn): ?>
                                 <div class="field">
@@ -2502,42 +2696,74 @@ function statusBadge(string $s): string
                             <?php endforeach; ?>
                         </div>
                     <?php else: ?>
-                        <?php $manualRows = count($selectedActivities) > 0 ? $selectedActivities : [['function_title' => '', 'activity_description' => '']]; ?>
-                        <div id="manualFunctionsActivitiesRows" class="activity-field-stack">
-                            <?php foreach ($manualRows as $index => $row): ?>
-                            <div class="field" data-manual-row>
-                                <div class="manual-row-header">
-                                    <div class="field">
-                                        <label>Función <?php echo $index + 1; ?></label>
-                                        <input name="manual_function_titles[]" value="<?php echo htmlspecialchars((string) ($row['function_title'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: Función de coordinación territorial">
-                                    </div>
-                                    <button class="manual-row-remove" type="button" data-remove-manual-row title="Borrar esta función y sus actividades" aria-label="Borrar esta función y sus actividades">×</button>
-                                </div>
-                                <label style="margin-top:8px;">Actividad de la función <?php echo $index + 1; ?></label>
-                                <textarea class="activity-textarea" name="manual_activity_texts[]" placeholder="Describe las actividades realizadas para esta función..."><?php echo htmlspecialchars((string) ($row['activity_description'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></textarea>
-                            </div>
-                            <?php endforeach; ?>
-                        </div>
-                        <div style="margin-top:10px;">
-                            <button class="btn btn-ghost btn-sm" type="button" id="addManualFunctionActivityRow">Agregar función</button>
-                        </div>
+                        <div class="alert alert-err">El convenio seleccionado no tiene funciones configuradas.</div>
                     <?php endif; ?>
 
                     <div class="form-footer">
                         <div style="display:flex; gap:10px; flex-wrap:wrap;">
                             <button class="btn" type="submit">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
-                                Guardar actividades
+                                Guardar y continuar
                             </button>
-                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>" data-preview-sign-report="<?php echo (int) $selectedReportId; ?>" data-missing-boleta="<?php echo htmlspecialchars($selectedMissingBoletaMessage, ENT_QUOTES, 'UTF-8'); ?>">Vista previa</button>
                             <a class="btn btn-ghost" href="informe_mensual.php" title="Al cerrar puede continuar su edición después">Cerrar</a>
                         </div>
-                        <span class="form-footer-note">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                            Si el informe es de convenio, completa una actividad por cada funcion. Si es manual, registra la actividad principal.
-                        </span>
+                        <span class="form-footer-note">El avance se guarda en estado borrador.</span>
                     </div>
                 </form>
+                <?php elseif ($wizardStep === 3): ?>
+                    <div class="wizard-review-grid">
+                        <section class="wizard-review-panel">
+                            <h3>Resumen del informe</h3>
+                            <div class="wizard-summary" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:0;">
+                                <div class="wizard-summary-item"><span>Periodo</span><strong><?php echo htmlspecialchars(($monthNames[(int) $selectedReport['report_month']] ?? '') . ' de ' . (string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Cuota</span><strong>N.º <?php echo (int) ($selectedReport['installment_number'] ?? 0); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Convenio</span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Dirección</span><strong><?php echo htmlspecialchars((string) $selectedReport['supervision_unit'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Boleta</span><strong>N.º <?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? 'Pendiente'), ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Valor líquido</span><strong>$<?php echo number_format((float) ($selectedReport['boleta_amount'] ?? 0), 0, ',', '.'); ?></strong></div>
+                            </div>
+                        </section>
+                        <section class="wizard-review-panel">
+                            <h3>Validación</h3>
+                            <ul class="wizard-check-list">
+                                <li><span class="wizard-check-icon<?php echo $selectedActivitiesComplete ? '' : ' is-missing'; ?>"><?php echo $selectedActivitiesComplete ? '✓' : '!'; ?></span><span><?php echo $selectedActivitiesComplete ? 'Todas las actividades están completas.' : 'Faltan actividades por completar.'; ?></span></li>
+                                <?php $selectedHasBoletaIdentity = trim((string) ($selectedReport['boleta_number'] ?? '')) !== '' && trim((string) ($selectedReport['boleta_date'] ?? '')) !== ''; ?>
+                                <li><span class="wizard-check-icon<?php echo $selectedHasBoletaIdentity ? '' : ' is-missing'; ?>"><?php echo $selectedHasBoletaIdentity ? '✓' : '!'; ?></span><span>Número y fecha de la boleta.</span></li>
+                                <li><span class="wizard-check-icon<?php echo (float) ($selectedReport['boleta_amount'] ?? 0) > 0 ? '' : ' is-missing'; ?>"><?php echo (float) ($selectedReport['boleta_amount'] ?? 0) > 0 ? '✓' : '!'; ?></span><span>Valor líquido de la boleta.</span></li>
+                                <li><span class="wizard-check-icon<?php echo $selectedBoletaFile !== null ? '' : ' is-missing'; ?>"><?php echo $selectedBoletaFile !== null ? '✓' : '!'; ?></span><span>Archivo PDF de la boleta.</span></li>
+                            </ul>
+                        </section>
+                    </div>
+                    <div class="form-footer">
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                            <a class="btn btn-ghost" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Volver</a>
+                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>">Vista previa del informe</button>
+                            <?php if ($selectedReadyForReview): ?>
+                                <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=4#reportWizard">Continuar</a>
+                            <?php else: ?>
+                                <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Corregir información faltante</a>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                <?php else: ?>
+                    <?php if ($selectedReadyForReview): ?>
+                        <div class="wizard-sign-panel">
+                            <h3>Informe listo para firmar</h3>
+                            <p>Al continuar, recibirás en tu correo un enlace personal para firmar el informe. Después de tu firma se enviará automáticamente al buzón del director correspondiente.</p>
+                            <form method="post" data-signature-request-form data-missing-boleta="">
+                                <input type="hidden" name="action" value="send_signature_request">
+                                <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+                                <input type="hidden" name="file_id" value="0">
+                                <input type="hidden" name="prepare_convenio_pdf" value="1">
+                                <button class="btn" type="submit">Firmar</button>
+                            </form>
+                        </div>
+                        <div class="form-footer"><a class="btn btn-ghost" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=3#reportWizard">Volver a revisión</a></div>
+                    <?php else: ?>
+                        <div class="alert alert-err">El informe aún tiene información pendiente. Completa las actividades y los antecedentes de la boleta antes de enviarlo a firma.</div>
+                        <div class="form-footer"><a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Completar información</a></div>
+                    <?php endif; ?>
+                <?php endif; ?>
             </div>
         </div>
         <?php endif; ?>
@@ -2636,7 +2862,7 @@ function statusBadge(string $s): string
                                     <div class="action-box">
                                         <h4>1) Completar actividades</h4>
                                         <p>Abre el formulario superior para cargar las actividades asociadas a este informe.</p>
-                                        <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>#reportActivitiesCard">Completar actividades</a>
+                                        <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>&amp;step=2#reportWizard">Continuar informe</a>
                                     </div>
                                     <?php endif; ?>
 
@@ -2781,6 +3007,9 @@ function statusBadge(string $s): string
         const agreementChoiceButtons = document.querySelectorAll('[data-select-agreement]');
         const createChoiceTitle = document.getElementById('createChoiceTitle');
         const createChoiceDescription = createChoiceTitle ? createChoiceTitle.nextElementSibling : null;
+        const createWizardProgress = document.getElementById('createWizardProgress');
+        const createReportButtonText = document.getElementById('createReportButtonText');
+        const manualCreateBoletaFields = document.querySelectorAll('.manual-create-boleta-field');
         const manualPdfPanel = document.getElementById('manualPdfPanel');
         const manualProfileFields = document.getElementById('manualProfileFields');
         const saveProfileRecords = document.getElementById('saveProfileRecords');
@@ -2827,12 +3056,18 @@ function statusBadge(string $s): string
             reportPdfManual.required = isManual;
             if (boletaNumberInput) boletaNumberInput.required = isManual;
             if (boletaDateInput) boletaDateInput.required = isManual;
+            if (installmentInput) installmentInput.required = !isManual;
             if (!isManual && manualProfileFields) {
                 manualProfileFields.style.display = 'none';
             }
             if (createSourcePill) {
                 createSourcePill.textContent = isManual ? 'Modalidad: Manual con PDF' : 'Modalidad: Convenio almacenado';
             }
+            if (createWizardProgress) createWizardProgress.style.display = isManual ? 'none' : 'grid';
+            if (createReportButtonText) createReportButtonText.textContent = isManual ? 'Crear informe' : 'Guardar y continuar';
+            manualCreateBoletaFields.forEach(function (field) {
+                field.style.display = isManual ? 'flex' : 'none';
+            });
             if (!isManual) {
                 applyAgreementData();
             }
