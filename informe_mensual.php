@@ -298,6 +298,13 @@ $agreementsStmt = $pdo->prepare("SELECT a.id, a.agreement_number, a.start_date, 
                                  ORDER BY a.start_date DESC");
 $agreementsStmt->execute(['uid' => $dbUser['id']]);
 $agreements = $agreementsStmt->fetchAll();
+$today = date('Y-m-d');
+$activeAgreements = array_values(array_filter($agreements, static function (array $agreement) use ($today): bool {
+    $startDate = (string) ($agreement['start_date'] ?? '');
+    $endDate = (string) ($agreement['end_date'] ?? '');
+
+    return $startDate !== '' && $endDate !== '' && $startDate <= $today && $endDate >= $today;
+}));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
@@ -376,6 +383,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($agreementRow === false) {
                     throw new RuntimeException('No se encontro el convenio seleccionado.');
+                }
+                $agreementStartDate = (string) ($agreementRow['start_date'] ?? '');
+                $agreementEndDate = (string) ($agreementRow['end_date'] ?? '');
+                $currentDate = date('Y-m-d');
+                if ($agreementStartDate === '' || $agreementEndDate === '' || $agreementStartDate > $currentDate || $agreementEndDate < $currentDate) {
+                    throw new RuntimeException('El convenio seleccionado no se encuentra vigente.');
                 }
 
                 $profession = trim((string) ($agreementRow['profession_experience'] ?? $profession));
@@ -1689,6 +1702,60 @@ function statusBadge(string $s): string
             font-weight: 800;
             margin-bottom: 10px;
         }
+        .modal-step[hidden] { display: none; }
+        .agreement-choice-list {
+            display: grid;
+            gap: 10px;
+            max-height: min(420px, 55vh);
+            overflow-y: auto;
+            padding: 2px;
+        }
+        .agreement-choice {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: #fff;
+            color: var(--text);
+            text-align: left;
+            cursor: pointer;
+            transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
+        }
+        .agreement-choice:hover,
+        .agreement-choice:focus-visible {
+            transform: translateY(-1px);
+            border-color: #8fc4d3;
+            box-shadow: 0 8px 22px rgba(11, 60, 100, .08);
+            outline: none;
+        }
+        .agreement-choice strong,
+        .agreement-choice small { display: block; }
+        .agreement-choice small {
+            margin-top: 4px;
+            color: var(--text-muted);
+        }
+        .agreement-choice-action {
+            flex: 0 0 auto;
+            color: var(--primary);
+            font-weight: 800;
+        }
+        .modal-step-actions {
+            display: flex;
+            justify-content: flex-start;
+            margin-top: 16px;
+        }
+        .empty-agreements {
+            padding: 22px;
+            border: 1px dashed var(--border);
+            border-radius: 14px;
+            background: #f8fafc;
+            color: var(--text-muted);
+            text-align: center;
+        }
 
         /* ── Form ── */
         .field-group {
@@ -2254,17 +2321,40 @@ function statusBadge(string $s): string
                     <button class="modal-close" type="button" id="closeCreateChoiceModal" aria-label="Cerrar">×</button>
                 </div>
                 <div class="modal-body">
-                    <div class="choice-grid">
-                        <button class="choice-card" type="button" data-create-source="CONVENIO">
-                            <span class="choice-emoji">C</span>
-                            <h4>Relacionarlo a un convenio</h4>
-                            <p>Autocompleta los datos desde el convenio guardado y luego registra una actividad por cada función.</p>
-                        </button>
-                        <button class="choice-card" type="button" data-create-source="MANUAL">
-                            <span class="choice-emoji">P</span>
-                            <h4>Cargar informe en PDF</h4>
-                            <p>Ingresa los datos manualmente y adjunta el PDF del informe en el mismo formulario.</p>
-                        </button>
+                    <div class="modal-step" id="createTypeStep">
+                        <div class="choice-grid">
+                            <button class="choice-card" type="button" data-open-agreement-step>
+                                <span class="choice-emoji">C</span>
+                                <h4>Relacionarlo a un convenio</h4>
+                                <p>Selecciona un convenio vigente y autocompleta sus antecedentes.</p>
+                            </button>
+                            <button class="choice-card" type="button" data-create-source="MANUAL">
+                                <span class="choice-emoji">P</span>
+                                <h4>Cargar informe en PDF</h4>
+                                <p>Ingresa los datos manualmente y adjunta el PDF del informe en el mismo formulario.</p>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="modal-step" id="createAgreementStep" hidden>
+                        <?php if ($activeAgreements !== []): ?>
+                            <div class="agreement-choice-list">
+                                <?php foreach ($activeAgreements as $agreement): ?>
+                                    <button class="agreement-choice" type="button" data-select-agreement="<?php echo (int) $agreement['id']; ?>">
+                                        <span>
+                                            <strong><?php echo htmlspecialchars((string) $agreement['agreement_number'], ENT_QUOTES, 'UTF-8'); ?></strong>
+                                            <small><?php echo htmlspecialchars((string) $agreement['program_item'], ENT_QUOTES, 'UTF-8'); ?></small>
+                                            <small>Vigente hasta <?php echo htmlspecialchars(date('d-m-Y', strtotime((string) $agreement['end_date'])), ENT_QUOTES, 'UTF-8'); ?></small>
+                                        </span>
+                                        <span class="agreement-choice-action">Seleccionar</span>
+                                    </button>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php else: ?>
+                            <div class="empty-agreements">No tienes convenios vigentes disponibles para crear un informe.</div>
+                        <?php endif; ?>
+                        <div class="modal-step-actions">
+                            <button class="btn btn-ghost" type="button" id="backToCreateTypeBtn">Volver atrás</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2684,6 +2774,13 @@ function statusBadge(string $s): string
         const openCreateChoiceBtn = document.getElementById('openCreateChoiceBtn');
         const closeCreateChoiceModal = document.getElementById('closeCreateChoiceModal');
         const choiceCards = document.querySelectorAll('[data-create-source]');
+        const openAgreementStepButton = document.querySelector('[data-open-agreement-step]');
+        const createTypeStep = document.getElementById('createTypeStep');
+        const createAgreementStep = document.getElementById('createAgreementStep');
+        const backToCreateTypeButton = document.getElementById('backToCreateTypeBtn');
+        const agreementChoiceButtons = document.querySelectorAll('[data-select-agreement]');
+        const createChoiceTitle = document.getElementById('createChoiceTitle');
+        const createChoiceDescription = createChoiceTitle ? createChoiceTitle.nextElementSibling : null;
         const manualPdfPanel = document.getElementById('manualPdfPanel');
         const manualProfileFields = document.getElementById('manualProfileFields');
         const saveProfileRecords = document.getElementById('saveProfileRecords');
@@ -3031,6 +3128,7 @@ function statusBadge(string $s): string
                 if (!createChoiceModal) {
                     return;
                 }
+                showCreateTypeStep();
                 createChoiceModal.style.display = 'flex';
                 createChoiceModal.setAttribute('aria-hidden', 'false');
                 openCreateChoiceBtn.setAttribute('aria-expanded', 'true');
@@ -3043,6 +3141,20 @@ function statusBadge(string $s): string
                 createChoiceModal.style.display = 'none';
                 createChoiceModal.setAttribute('aria-hidden', 'true');
                 openCreateChoiceBtn.setAttribute('aria-expanded', 'false');
+            };
+
+            const showCreateTypeStep = function () {
+                if (createTypeStep) createTypeStep.hidden = false;
+                if (createAgreementStep) createAgreementStep.hidden = true;
+                if (createChoiceTitle) createChoiceTitle.textContent = '¿Qué tipo de informe deseas crear?';
+                if (createChoiceDescription) createChoiceDescription.textContent = 'Elige si el informe se relaciona a un convenio almacenado o si cargarás un PDF ya preparado.';
+            };
+
+            const showAgreementStep = function () {
+                if (createTypeStep) createTypeStep.hidden = true;
+                if (createAgreementStep) createAgreementStep.hidden = false;
+                if (createChoiceTitle) createChoiceTitle.textContent = '¿Qué convenio deseas seleccionar?';
+                if (createChoiceDescription) createChoiceDescription.textContent = 'Se muestran únicamente tus convenios vigentes.';
             };
 
             if (!openCreateChoiceBtn || !createChoiceModal || !createCard) {
@@ -3091,6 +3203,25 @@ function statusBadge(string $s): string
             choiceCards.forEach(function (card) {
                 card.addEventListener('click', function () {
                     chooseSource(card.dataset.createSource || 'CONVENIO');
+                });
+            });
+
+            if (openAgreementStepButton) {
+                openAgreementStepButton.addEventListener('click', showAgreementStep);
+            }
+
+            if (backToCreateTypeButton) {
+                backToCreateTypeButton.addEventListener('click', showCreateTypeStep);
+            }
+
+            agreementChoiceButtons.forEach(function (button) {
+                button.addEventListener('click', function () {
+                    const agreementId = button.dataset.selectAgreement || '';
+                    if (agreementSelect) {
+                        agreementSelect.value = agreementId;
+                        applyAgreementData();
+                    }
+                    chooseSource('CONVENIO');
                 });
             });
 
