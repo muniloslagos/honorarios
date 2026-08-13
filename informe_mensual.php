@@ -26,6 +26,8 @@ $selectedReportId = (int) ($_GET['report_id'] ?? 0);
 $wizardStep = max(1, min(4, (int) ($_GET['step'] ?? 2)));
 if ((string) ($_GET['notice'] ?? '') === 'activities_saved') {
     $success = 'Actividades y antecedentes de la boleta guardados correctamente.';
+} elseif ((string) ($_GET['notice'] ?? '') === 'draft_saved') {
+    $success = 'Borrador guardado correctamente. Puedes continuar ahora o regresar más tarde.';
 }
 
 function pdfEscape(string $text): string
@@ -665,6 +667,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $sourceType = (string) $reportRow['source_type'];
             $agreementId = (int) ($reportRow['agreement_id'] ?? 0);
+            $saveDraftOnly = $sourceType === 'CONVENIO' && (string) ($_POST['wizard_submit'] ?? 'continue') === 'save';
 
             $finalProfession = trim((string) ($_POST['profession_experience'] ?? ''));
             $finalSupervision = $configuredDirectionName;
@@ -710,12 +713,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         throw new RuntimeException('Debes indicar una cuota valida para el convenio.');
                     }
                 }
-                $missingStepTwoData = [];
-                if ($finalBoletaNumber === '') $missingStepTwoData[] = 'número de boleta';
-                if ($finalBoletaDate === '') $missingStepTwoData[] = 'fecha de boleta';
-                if ($finalBoletaAmount === null || $finalBoletaAmount <= 0) $missingStepTwoData[] = 'valor líquido de la boleta';
-                if ($missingStepTwoData !== []) {
-                    throw new RuntimeException('Completa los antecedentes de la boleta: ' . implode(', ', $missingStepTwoData) . '.');
+                if (!$saveDraftOnly) {
+                    $missingStepTwoData = [];
+                    if ($finalBoletaNumber === '') $missingStepTwoData[] = 'número de boleta';
+                    if ($finalBoletaDate === '') $missingStepTwoData[] = 'fecha de boleta';
+                    if ($finalBoletaAmount === null || $finalBoletaAmount <= 0) $missingStepTwoData[] = 'valor líquido de la boleta';
+                    if ($missingStepTwoData !== []) {
+                        throw new RuntimeException('Completa los antecedentes de la boleta: ' . implode(', ', $missingStepTwoData) . '.');
+                    }
                 }
             } elseif ($sourceType === 'MANUAL') {
                 if ($finalProfession === '' || $finalProgram === '' || $finalSupervision === '' || $finalDecree === '' || $finalStart === '' || $finalEnd === '') {
@@ -727,7 +732,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $newBoletaAbsolutePath = $boletaPdf !== null
                 ? __DIR__ . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $boletaPdf['stored_path'])
                 : '';
-            if ($sourceType === 'CONVENIO' && $boletaPdf === null && (int) ($reportRow['has_boleta_pdf'] ?? 0) !== 1) {
+            if ($sourceType === 'CONVENIO' && !$saveDraftOnly && $boletaPdf === null && (int) ($reportRow['has_boleta_pdf'] ?? 0) !== 1) {
                 throw new RuntimeException('Debes adjuntar el archivo PDF de la boleta para continuar.');
             }
             $previousBoletaPaths = [];
@@ -795,7 +800,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $inserted = 0;
                     foreach ($functions as $index => $fn) {
                         $text = isset($activityTexts[$index]) ? trim((string) $activityTexts[$index]) : '';
-                        if ($text === '') {
+                        if ($text === '' && !$saveDraftOnly) {
                             throw new RuntimeException('Debes completar una actividad para cada funcion del convenio.');
                         }
 
@@ -873,6 +878,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $selectedReportId = $reportId;
+            if ($saveDraftOnly) {
+                redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=2&notice=draft_saved#reportWizard');
+            }
             redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=3&notice=activities_saved#reportWizard');
         } elseif ($action === 'generate_convenio_pdf') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
@@ -2603,7 +2611,9 @@ function statusBadge(string $s): string
             if ($selectedBoletaFile === null) $selectedMissingBoletaFields[] = 'archivo PDF de la boleta';
             $selectedMissingBoletaMessage = implode(', ', $selectedMissingBoletaFields);
             $installmentsTotal = $selectedAgreement !== null ? (int) ($selectedAgreement['installments_total'] ?? 0) : 0;
-            $selectedActivitiesComplete = count($selectedFunctions) > 0 && count($selectedActivities) === count($selectedFunctions);
+            $selectedActivitiesComplete = count($selectedFunctions) > 0
+                && count($selectedActivities) === count($selectedFunctions)
+                && count(array_filter($selectedActivities, static fn (array $activity): bool => trim((string) ($activity['activity_description'] ?? '')) !== '')) === count($selectedFunctions);
             $selectedReadyForReview = $selectedActivitiesComplete && $selectedMissingBoletaFields === [];
             $selectedAgreementNumber = (string) ($selectedAgreement['agreement_number'] ?? 'Convenio asociado');
             $wizardStep = max(2, $wizardStep);
@@ -2611,7 +2621,7 @@ function statusBadge(string $s): string
         <div class="card report-activity-card" id="reportWizard">
             <div class="card-header">
                 <h2>Preparar informe por convenio</h2>
-                <a class="btn btn-ghost btn-sm" href="informe_mensual.php" title="Puedes continuar la edición después">Cerrar</a>
+                <a class="btn btn-ghost btn-sm" href="dashboard.php" title="Volver a la portada">Cerrar</a>
             </div>
             <div class="card-body">
                 <div class="report-wizard-progress" aria-label="Progreso del informe">
@@ -2699,15 +2709,16 @@ function statusBadge(string $s): string
                         <div class="alert alert-err">El convenio seleccionado no tiene funciones configuradas.</div>
                     <?php endif; ?>
 
-                    <div class="form-footer">
-                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                            <button class="btn" type="submit">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
-                                Guardar y continuar
+                    <div class="form-footer" style="align-items:center;">
+                        <button class="btn btn-ghost" type="submit" name="wizard_submit" value="save" formnovalidate>
+                            Guardar
+                        </button>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+                            <button class="btn" type="submit" name="wizard_submit" value="continue">
+                                Continuar
                             </button>
-                            <a class="btn btn-ghost" href="informe_mensual.php" title="Al cerrar puede continuar su edición después">Cerrar</a>
+                            <a class="btn btn-ghost" href="dashboard.php" title="Volver a la portada">Cerrar</a>
                         </div>
-                        <span class="form-footer-note">El avance se guarda en estado borrador.</span>
                     </div>
                 </form>
                 <?php elseif ($wizardStep === 3): ?>
