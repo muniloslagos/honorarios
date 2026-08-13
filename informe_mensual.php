@@ -28,6 +28,8 @@ if ((string) ($_GET['notice'] ?? '') === 'activities_saved') {
     $success = 'Actividades y antecedentes de la boleta guardados correctamente.';
 } elseif ((string) ($_GET['notice'] ?? '') === 'draft_saved') {
     $success = 'Borrador guardado correctamente. Puedes continuar ahora o regresar más tarde.';
+} elseif ((string) ($_GET['notice'] ?? '') === 'manual_boleta_saved') {
+    $success = 'Antecedentes de la boleta guardados correctamente.';
 }
 
 function pdfEscape(string $text): string
@@ -632,7 +634,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($sourceType === 'CONVENIO') {
                 redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=2#reportWizard');
             }
-            $success = 'Informe manual creado correctamente.';
+            redirectTo('informe_mensual.php?report_id=' . $selectedReportId . '&step=2#reportWizard');
         } elseif ($action === 'save_activities') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
 
@@ -921,6 +923,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $success = $source === 'MANUAL' ? 'Informe abierto para corrección. Puedes conservar el PDF original o eliminarlo y adjuntar uno corregido.' : 'Informe abierto para corrección. Corrige las actividades y prepara nuevamente el PDF.';
         } elseif ($action === 'save_manual_boleta') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
+            $saveManualDraftOnly = (string) ($_POST['wizard_submit'] ?? 'save') === 'save';
             $number = trim((string) ($_POST['boleta_number'] ?? ''));
             $date = trim((string) ($_POST['boleta_date'] ?? ''));
             $amountRaw = str_replace(['.', ','], ['', '.'], trim((string) ($_POST['boleta_amount'] ?? '')));
@@ -929,6 +932,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $manualStmt->execute(['id'=>$reportId,'uid'=>$dbUser['id']]);
             if ($manualStmt->fetchColumn() === false) throw new RuntimeException('El informe manual ya no permite modificar la boleta.');
             $boletaPdf = uploadPdf($_FILES['boleta_pdf'] ?? [], 'reports/boletas');
+            $existingBoletaStmt = $pdo->prepare("SELECT EXISTS(SELECT 1 FROM monthly_report_files WHERE report_id=:id AND file_type='BOLETA')");
+            $existingBoletaStmt->execute(['id' => $reportId]);
+            $hasExistingBoleta = (int) $existingBoletaStmt->fetchColumn() === 1;
+            if (!$saveManualDraftOnly) {
+                $missingManualBoleta = [];
+                if ($number === '') $missingManualBoleta[] = 'número de boleta';
+                if ($date === '') $missingManualBoleta[] = 'fecha de boleta';
+                if ($amount === null || $amount <= 0) $missingManualBoleta[] = 'valor líquido de la boleta';
+                if ($boletaPdf === null && !$hasExistingBoleta) $missingManualBoleta[] = 'archivo PDF de la boleta';
+                if ($missingManualBoleta !== []) {
+                    throw new RuntimeException('Completa los antecedentes de la boleta: ' . implode(', ', $missingManualBoleta) . '.');
+                }
+            }
             $pdo->beginTransaction();
             try {
                 $pdo->prepare('UPDATE monthly_reports SET boleta_number=:number,boleta_date=:date,boleta_amount=:amount WHERE id=:id AND honorario_user_id=:uid')
@@ -943,7 +959,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $manualBoletaError;
             }
-            $success = 'Antecedentes de la boleta guardados correctamente.';        } elseif ($action === 'send_signature_request') {
+            if ($saveManualDraftOnly) {
+                redirectTo('informe_mensual.php?report_id=' . $reportId . '&step=2&notice=draft_saved#reportWizard');
+            }
+            redirectTo('informe_mensual.php?report_id=' . $reportId . '&step=3&notice=manual_boleta_saved#reportWizard');
+        } elseif ($action === 'send_signature_request') {
             $reportId = (int) ($_POST['report_id'] ?? 0);
             $fileId = (int) ($_POST['file_id'] ?? 0);
 
@@ -2322,7 +2342,7 @@ function statusBadge(string $s): string
                 <span class="create-source-pill" id="createSourcePill">Modalidad: <?php echo $selectedCreateSource === 'MANUAL' ? 'Manual con PDF' : 'Convenio almacenado'; ?></span>
             </div>
             <div class="card-body">
-                <div class="report-wizard-progress" id="createWizardProgress"<?php echo $selectedCreateSource === 'MANUAL' ? ' style="display:none;"' : ''; ?>>
+                <div class="report-wizard-progress" id="createWizardProgress">
                     <div class="report-wizard-step is-active">
                         <span class="report-wizard-number">1</span>
                         <span class="report-wizard-label"><strong>Datos del informe</strong><small>Periodo y convenio</small></span>
@@ -2413,15 +2433,15 @@ function statusBadge(string $s): string
                             <label>N° cuota (si aplica)</label>
                             <input type="number" min="1" name="installment_number" id="installmentInput" placeholder="Ej: 3">
                         </div>
-                        <div class="field manual-create-boleta-field">
+                        <div class="field manual-create-boleta-field" style="display:none;">
                             <label>N° boleta</label>
                             <input name="boleta_number" id="boletaNumberInput" placeholder="Ej: BOL-2026-041">
                         </div>
-                        <div class="field manual-create-boleta-field">
+                        <div class="field manual-create-boleta-field" style="display:none;">
                             <label>Fecha de boleta</label>
                             <input type="date" name="boleta_date" id="boletaDateInput">
                         </div>
-                        <div class="field manual-create-boleta-field">
+                        <div class="field manual-create-boleta-field" style="display:none;">
                             <label>Valor líquido de la boleta</label>
                             <input type="number" min="0" step="1" name="boleta_amount" id="boletaAmountInput" placeholder="Ej: 805125">
                         </div>
@@ -2440,7 +2460,7 @@ function statusBadge(string $s): string
                                 <label>PDF del decreto</label>
                                 <input type="file" name="decree_pdf_manual" id="decreePdfManual" accept="application/pdf">
                             </div>
-                            <div class="field">
+                            <div class="field" style="display:none;">
                                 <label>PDF de la boleta</label>
                                 <input type="file" name="boleta_pdf_manual" id="boletaPdfManual" accept="application/pdf">
                             </div>
@@ -2502,17 +2522,15 @@ function statusBadge(string $s): string
                     </div>
 
                     <div class="form-footer">
-                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                            <button class="btn" type="submit">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
-                                <span id="createReportButtonText"><?php echo $selectedCreateSource === 'MANUAL' ? 'Crear informe' : 'Guardar y continuar'; ?></span>
-                            </button>
-                            <button class="btn btn-ghost" type="button" id="cancelCreateReportBtn">Cancelar</button>
-                        </div>
+                        <button class="btn btn-ghost" type="button" id="cancelCreateReportBtn">Cancelar</button>
                         <span class="form-footer-note">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                             El informe se guardará en estado Borrador. La carga de actividades queda para la próxima etapa.
                         </span>
+                        <button class="btn" type="submit">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m-7-7l7 7 7-7"/></svg>
+                            <span id="createReportButtonText">Guardar y continuar</span>
+                        </button>
                     </div>
 
                 </form>
@@ -2594,11 +2612,11 @@ function statusBadge(string $s): string
         <?php if (
             $selectedReportId > 0
             && isset($reportsById[$selectedReportId])
-            && (string) $reportsById[$selectedReportId]['source_type'] === 'CONVENIO'
             && $selectedReportCanEditActivities
         ): ?>
         <?php
             $selectedReport = $reportsById[$selectedReportId];
+            $selectedIsConvenio = (string) ($selectedReport['source_type'] ?? '') === 'CONVENIO';
             $selectedAgreementId = (int) ($selectedReport['agreement_id'] ?? 0);
             $selectedAgreement = $selectedAgreementId > 0 ? ($agreementById[$selectedAgreementId] ?? null) : null;
             $selectedFunctions = $selectedAgreementId > 0 ? ($agreementFunctionsMap[$selectedAgreementId] ?? []) : [];
@@ -2611,16 +2629,21 @@ function statusBadge(string $s): string
             if ($selectedBoletaFile === null) $selectedMissingBoletaFields[] = 'archivo PDF de la boleta';
             $selectedMissingBoletaMessage = implode(', ', $selectedMissingBoletaFields);
             $installmentsTotal = $selectedAgreement !== null ? (int) ($selectedAgreement['installments_total'] ?? 0) : 0;
-            $selectedActivitiesComplete = count($selectedFunctions) > 0
+            $selectedReportPdf = $pdfFilesByReport[$selectedReportId] ?? null;
+            $selectedActivitiesComplete = !$selectedIsConvenio || (
+                count($selectedFunctions) > 0
                 && count($selectedActivities) === count($selectedFunctions)
-                && count(array_filter($selectedActivities, static fn (array $activity): bool => trim((string) ($activity['activity_description'] ?? '')) !== '')) === count($selectedFunctions);
-            $selectedReadyForReview = $selectedActivitiesComplete && $selectedMissingBoletaFields === [];
-            $selectedAgreementNumber = (string) ($selectedAgreement['agreement_number'] ?? 'Convenio asociado');
+                && count(array_filter($selectedActivities, static fn (array $activity): bool => trim((string) ($activity['activity_description'] ?? '')) !== '')) === count($selectedFunctions)
+            );
+            $selectedReadyForReview = $selectedActivitiesComplete
+                && $selectedMissingBoletaFields === []
+                && ($selectedIsConvenio || $selectedReportPdf !== null);
+            $selectedAgreementNumber = $selectedIsConvenio ? (string) ($selectedAgreement['agreement_number'] ?? 'Convenio asociado') : 'Informe manual';
             $wizardStep = max(2, $wizardStep);
         ?>
         <div class="card report-activity-card" id="reportWizard">
             <div class="card-header">
-                <h2>Preparar informe por convenio</h2>
+                <h2>Preparar informe <?php echo $selectedIsConvenio ? 'por convenio' : 'manual'; ?></h2>
                 <a class="btn btn-ghost btn-sm" href="dashboard.php" title="Volver a la portada">Cerrar</a>
             </div>
             <div class="card-body">
@@ -2631,7 +2654,7 @@ function statusBadge(string $s): string
                     </div>
                     <a class="report-wizard-step<?php echo $wizardStep === 2 ? ' is-active' : ''; ?><?php echo $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">
                         <span class="report-wizard-number"><?php echo $selectedReadyForReview ? '✓' : '2'; ?></span>
-                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small>Completar antecedentes</small></span>
+                        <span class="report-wizard-label"><strong>Actividades y boleta</strong><small><?php echo $selectedIsConvenio ? 'Completar antecedentes' : 'Antecedentes de la boleta'; ?></small></span>
                     </a>
                     <a class="report-wizard-step<?php echo $wizardStep === 3 ? ' is-active' : ''; ?><?php echo $wizardStep > 3 && $selectedReadyForReview ? ' is-complete' : ''; ?>" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=3#reportWizard">
                         <span class="report-wizard-number"><?php echo $wizardStep > 3 && $selectedReadyForReview ? '✓' : '3'; ?></span>
@@ -2647,10 +2670,11 @@ function statusBadge(string $s): string
                 <div class="wizard-summary">
                     <div class="wizard-summary-item"><span>Periodo</span><strong><?php echo htmlspecialchars(($monthNames[(int) $selectedReport['report_month']] ?? '') . ' de ' . (string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
                     <div class="wizard-summary-item"><span>Dirección</span><strong><?php echo htmlspecialchars((string) $selectedReport['supervision_unit'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
-                    <div class="wizard-summary-item"><span>Convenio</span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
-                    <div class="wizard-summary-item"><span>Cuota</span><strong>N.º <?php echo (int) ($selectedReport['installment_number'] ?? 0); ?></strong></div>
+                    <div class="wizard-summary-item"><span><?php echo $selectedIsConvenio ? 'Convenio' : 'Modalidad'; ?></span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                    <div class="wizard-summary-item"><span>Cuota</span><strong><?php echo $selectedIsConvenio ? 'N.º ' . (int) ($selectedReport['installment_number'] ?? 0) : 'No aplica'; ?></strong></div>
                 </div>
 
+                <?php if ($selectedIsConvenio): ?>
                 <form method="post" enctype="multipart/form-data" id="wizardActivitiesForm">
                     <input type="hidden" name="action" value="save_activities">
                     <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
@@ -2714,21 +2738,89 @@ function statusBadge(string $s): string
                             Guardar
                         </button>
                         <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+                            <a class="btn btn-ghost" href="dashboard.php" title="Volver a la portada">Cerrar</a>
                             <button class="btn" type="submit" name="wizard_submit" value="continue">
                                 Continuar
                             </button>
-                            <a class="btn btn-ghost" href="dashboard.php" title="Volver a la portada">Cerrar</a>
                         </div>
                     </div>
                 </form>
+                <?php else: ?>
+                <div class="wizard-review-panel" style="margin-bottom:18px;">
+                    <h3>PDF del informe manual</h3>
+                    <?php if ($selectedReportPdf !== null): ?>
+                        <div class="uploaded-pdf-row">
+                            <div class="uploaded-pdf-info">
+                                <span aria-hidden="true">✓</span>
+                                <span class="uploaded-pdf-name"><?php echo htmlspecialchars((string) $selectedReportPdf['original_name'], ENT_QUOTES, 'UTF-8'); ?></span>
+                            </div>
+                            <div class="uploaded-pdf-actions">
+                                <button class="btn btn-ghost btn-sm" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $selectedReportPdf['id']; ?>">Vista previa</button>
+                                <form method="post" action="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard" class="upload-inline" data-delete-pdf-form>
+                                    <input type="hidden" name="action" value="delete_pdf">
+                                    <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+                                    <input type="hidden" name="file_id" value="<?php echo (int) $selectedReportPdf['id']; ?>">
+                                    <button class="btn btn-sm btn-delete-pdf" type="submit">Borrar</button>
+                                </form>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <p>El PDF fue eliminado. Adjunta el informe corregido para poder continuar.</p>
+                        <form method="post" action="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard" enctype="multipart/form-data" class="upload-inline">
+                            <input type="hidden" name="action" value="upload_pdf">
+                            <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+                            <input type="file" name="report_pdf" accept="application/pdf" required>
+                            <button class="btn btn-sm" type="submit">Cargar PDF</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+                <form method="post" enctype="multipart/form-data" id="wizardManualBoletaForm">
+                    <input type="hidden" name="action" value="save_manual_boleta">
+                    <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
+
+                    <p class="form-section-title">Antecedentes de la boleta</p>
+                    <div class="field-group field-group-4">
+                        <div class="field">
+                            <label>N° boleta</label>
+                            <input name="boleta_number" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                        </div>
+                        <div class="field">
+                            <label>Fecha de boleta</label>
+                            <input type="date" name="boleta_date" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_date'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>">
+                        </div>
+                        <div class="field">
+                            <label>Valor líquido de la boleta</label>
+                            <input type="number" min="1" step="1" name="boleta_amount" value="<?php echo htmlspecialchars((string) ($selectedReport['boleta_amount'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="Ej: 805125">
+                        </div>
+                        <div class="field">
+                            <label>Archivo de la boleta (PDF)</label>
+                            <?php if ($selectedBoletaFile !== null): ?>
+                                <p class="form-footer-note" style="margin:0 0 8px;">Archivo cargado: <?php echo htmlspecialchars((string) $selectedBoletaFile['original_name'], ENT_QUOTES, 'UTF-8'); ?></p>
+                            <?php endif; ?>
+                            <input type="file" name="boleta_pdf" accept="application/pdf">
+                            <small><?php echo $selectedBoletaFile !== null ? 'Selecciona un PDF solo si deseas reemplazar la boleta.' : 'Debe estar adjunto antes de continuar.'; ?></small>
+                        </div>
+                    </div>
+                    <div class="options-note" style="margin-top:14px;">
+                        <p><strong>Informe manual.</strong> El PDF del informe ya quedó guardado en la etapa anterior. En esta etapa solo debes completar la boleta.</p>
+                    </div>
+                    <div class="form-footer" style="align-items:center;">
+                        <button class="btn btn-ghost" type="submit" name="wizard_submit" value="save" formnovalidate>Guardar</button>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+                            <a class="btn btn-ghost" href="dashboard.php" title="Volver a la portada">Cerrar</a>
+                            <button class="btn" type="submit" name="wizard_submit" value="continue">Continuar</button>
+                        </div>
+                    </div>
+                </form>
+                <?php endif; ?>
                 <?php elseif ($wizardStep === 3): ?>
                     <div class="wizard-review-grid">
                         <section class="wizard-review-panel">
                             <h3>Resumen del informe</h3>
                             <div class="wizard-summary" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:0;">
                                 <div class="wizard-summary-item"><span>Periodo</span><strong><?php echo htmlspecialchars(($monthNames[(int) $selectedReport['report_month']] ?? '') . ' de ' . (string) $selectedReport['report_year'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
-                                <div class="wizard-summary-item"><span>Cuota</span><strong>N.º <?php echo (int) ($selectedReport['installment_number'] ?? 0); ?></strong></div>
-                                <div class="wizard-summary-item"><span>Convenio</span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
+                                <div class="wizard-summary-item"><span>Cuota</span><strong><?php echo $selectedIsConvenio ? 'N.º ' . (int) ($selectedReport['installment_number'] ?? 0) : 'No aplica'; ?></strong></div>
+                                <div class="wizard-summary-item"><span><?php echo $selectedIsConvenio ? 'Convenio' : 'Modalidad'; ?></span><strong><?php echo htmlspecialchars($selectedAgreementNumber, ENT_QUOTES, 'UTF-8'); ?></strong></div>
                                 <div class="wizard-summary-item"><span>Dirección</span><strong><?php echo htmlspecialchars((string) $selectedReport['supervision_unit'], ENT_QUOTES, 'UTF-8'); ?></strong></div>
                                 <div class="wizard-summary-item"><span>Boleta</span><strong>N.º <?php echo htmlspecialchars((string) ($selectedReport['boleta_number'] ?? 'Pendiente'), ENT_QUOTES, 'UTF-8'); ?></strong></div>
                                 <div class="wizard-summary-item"><span>Valor líquido</span><strong>$<?php echo number_format((float) ($selectedReport['boleta_amount'] ?? 0), 0, ',', '.'); ?></strong></div>
@@ -2737,7 +2829,11 @@ function statusBadge(string $s): string
                         <section class="wizard-review-panel">
                             <h3>Validación</h3>
                             <ul class="wizard-check-list">
-                                <li><span class="wizard-check-icon<?php echo $selectedActivitiesComplete ? '' : ' is-missing'; ?>"><?php echo $selectedActivitiesComplete ? '✓' : '!'; ?></span><span><?php echo $selectedActivitiesComplete ? 'Todas las actividades están completas.' : 'Faltan actividades por completar.'; ?></span></li>
+                                <?php if ($selectedIsConvenio): ?>
+                                    <li><span class="wizard-check-icon<?php echo $selectedActivitiesComplete ? '' : ' is-missing'; ?>"><?php echo $selectedActivitiesComplete ? '✓' : '!'; ?></span><span><?php echo $selectedActivitiesComplete ? 'Todas las actividades están completas.' : 'Faltan actividades por completar.'; ?></span></li>
+                                <?php else: ?>
+                                    <li><span class="wizard-check-icon<?php echo $selectedReportPdf !== null ? '' : ' is-missing'; ?>"><?php echo $selectedReportPdf !== null ? '✓' : '!'; ?></span><span>Archivo PDF del informe manual.</span></li>
+                                <?php endif; ?>
                                 <?php $selectedHasBoletaIdentity = trim((string) ($selectedReport['boleta_number'] ?? '')) !== '' && trim((string) ($selectedReport['boleta_date'] ?? '')) !== ''; ?>
                                 <li><span class="wizard-check-icon<?php echo $selectedHasBoletaIdentity ? '' : ' is-missing'; ?>"><?php echo $selectedHasBoletaIdentity ? '✓' : '!'; ?></span><span>Número y fecha de la boleta.</span></li>
                                 <li><span class="wizard-check-icon<?php echo (float) ($selectedReport['boleta_amount'] ?? 0) > 0 ? '' : ' is-missing'; ?>"><?php echo (float) ($selectedReport['boleta_amount'] ?? 0) > 0 ? '✓' : '!'; ?></span><span>Valor líquido de la boleta.</span></li>
@@ -2748,13 +2844,17 @@ function statusBadge(string $s): string
                     <div class="form-footer">
                         <div style="display:flex;gap:10px;flex-wrap:wrap;">
                             <a class="btn btn-ghost" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Volver</a>
-                            <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>">Vista previa del informe</button>
-                            <?php if ($selectedReadyForReview): ?>
-                                <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=4#reportWizard">Continuar</a>
-                            <?php else: ?>
-                                <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Corregir información faltante</a>
+                            <?php if ($selectedIsConvenio): ?>
+                                <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=preview_pdf&amp;report_id=<?php echo (int) $selectedReportId; ?>">Vista previa del informe</button>
+                            <?php elseif ($selectedReportPdf !== null): ?>
+                                <button class="btn btn-ghost" type="button" data-preview-pdf="informe_mensual.php?action=view_uploaded_pdf&amp;file_id=<?php echo (int) $selectedReportPdf['id']; ?>">Vista previa del informe</button>
                             <?php endif; ?>
                         </div>
+                        <?php if ($selectedReadyForReview): ?>
+                            <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=4#reportWizard">Continuar</a>
+                        <?php else: ?>
+                            <a class="btn" href="?report_id=<?php echo (int) $selectedReportId; ?>&amp;step=2#reportWizard">Corregir información faltante</a>
+                        <?php endif; ?>
                     </div>
                 <?php else: ?>
                     <?php if ($selectedReadyForReview): ?>
@@ -2764,8 +2864,8 @@ function statusBadge(string $s): string
                             <form method="post" data-signature-request-form data-missing-boleta="">
                                 <input type="hidden" name="action" value="send_signature_request">
                                 <input type="hidden" name="report_id" value="<?php echo (int) $selectedReportId; ?>">
-                                <input type="hidden" name="file_id" value="0">
-                                <input type="hidden" name="prepare_convenio_pdf" value="1">
+                                <input type="hidden" name="file_id" value="<?php echo $selectedIsConvenio ? 0 : (int) ($selectedReportPdf['id'] ?? 0); ?>">
+                                <?php if ($selectedIsConvenio): ?><input type="hidden" name="prepare_convenio_pdf" value="1"><?php endif; ?>
                                 <button class="btn" type="submit">Firmar</button>
                             </form>
                         </div>
@@ -2780,7 +2880,7 @@ function statusBadge(string $s): string
         <?php endif; ?>
 
         <!-- Listado -->
-        <?php if (!$showCreateForm && ($selectedReportId <= 0 || (isset($reportsById[$selectedReportId]) && (string) $reportsById[$selectedReportId]['source_type'] === 'MANUAL'))): ?>
+        <?php if (!$showCreateForm && $selectedReportId <= 0): ?>
         <div class="card" id="reportsListCard">
             <div class="card-header">
                 <h2><span class="step">3</span> Informes registrados</h2>
@@ -2869,7 +2969,7 @@ function statusBadge(string $s): string
                                         <form method="post"><input type="hidden" name="action" value="reopen_rejected"><input type="hidden" name="report_id" value="<?php echo $reportId; ?>"><button class="btn btn-sm" type="submit">Corregir y enviar nuevamente</button></form>
                                     </div>
                                     <?php endif; ?>
-                                    <?php if ($isConvenio && $canCompleteActivities): ?>
+                                    <?php if ($canCompleteActivities): ?>
                                     <a class="btn btn-sm" href="?report_id=<?php echo $reportId; ?>&amp;step=2#reportWizard">Continuar informe</a>
                                     <?php endif; ?>
 
@@ -2896,7 +2996,7 @@ function statusBadge(string $s): string
                                     </div>
                                     <?php endif; ?>
 
-                                    <?php if (!$isConvenio): ?>
+                                    <?php if (!$isConvenio && !$canCompleteActivities): ?>
                                     <div class="action-box">
                                         <h4><?php echo $isFinalizedReport ? 'Proceso de firmas finalizado' : ($isSignedReportPdf ? 'Enviado a Firma (Director(a))' : ($isPendingEmployeeSignature ? 'Enviado a Firma (Funcionario)' : 'Adjuntar informe en PDF')); ?></h4>
                                         <?php if (!$isPendingEmployeeSignature && !$isSignedReportPdf && !$isFinalizedReport): ?>
@@ -3052,8 +3152,8 @@ function statusBadge(string $s): string
             manualPdfPanel.classList.toggle('is-visible', isManual);
             manualPdfPanel.style.display = isManual ? 'grid' : 'none';
             reportPdfManual.required = isManual;
-            if (boletaNumberInput) boletaNumberInput.required = isManual;
-            if (boletaDateInput) boletaDateInput.required = isManual;
+            if (boletaNumberInput) boletaNumberInput.required = false;
+            if (boletaDateInput) boletaDateInput.required = false;
             if (installmentInput) installmentInput.required = !isManual;
             if (!isManual && manualProfileFields) {
                 manualProfileFields.style.display = 'none';
@@ -3061,10 +3161,10 @@ function statusBadge(string $s): string
             if (createSourcePill) {
                 createSourcePill.textContent = isManual ? 'Modalidad: Manual con PDF' : 'Modalidad: Convenio almacenado';
             }
-            if (createWizardProgress) createWizardProgress.style.display = isManual ? 'none' : 'grid';
-            if (createReportButtonText) createReportButtonText.textContent = isManual ? 'Crear informe' : 'Guardar y continuar';
+            if (createWizardProgress) createWizardProgress.style.display = 'grid';
+            if (createReportButtonText) createReportButtonText.textContent = 'Guardar y continuar';
             manualCreateBoletaFields.forEach(function (field) {
-                field.style.display = isManual ? 'flex' : 'none';
+                field.style.display = 'none';
             });
             if (!isManual) {
                 applyAgreementData();
@@ -3082,7 +3182,7 @@ function statusBadge(string $s): string
             manualProfileFields.style.display = isManual && saveProfile ? 'grid' : 'none';
             if (agreementPdfManual) agreementPdfManual.required = isManual && saveProfile;
             if (decreePdfManual) decreePdfManual.required = isManual && saveProfile;
-            if (boletaPdfManual) boletaPdfManual.required = isManual;
+            if (boletaPdfManual) boletaPdfManual.required = false;
             if (agreementNumberManual) agreementNumberManual.required = isManual && saveProfile;
             if (agreementDateManual) agreementDateManual.required = isManual && saveProfile;
             if (installmentsTotalManual) installmentsTotalManual.required = isManual && saveProfile;
